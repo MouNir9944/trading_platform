@@ -184,6 +184,9 @@ tr:last-child td{border-bottom:0}
         <label><input type="checkbox" id="lMACD" checked> MACD</label>
         <label><input type="checkbox" id="lPat" checked> Patterns</label>
         <label><input type="checkbox" id="lBands" checked> Risk / reward zones</label>
+        <label><input type="checkbox" id="lFib"> Fibonacci</label>
+        <label><input type="checkbox" id="lCandle" checked> Candles</label>
+        <label><input type="checkbox" id="lDiv" checked> Divergence</label>
       </div>
       <div id="stage">
         <canvas id="chart" height="380"></canvas>
@@ -207,6 +210,16 @@ tr:last-child td{border-bottom:0}
     <div class="panel" style="margin-bottom:18px">
       <h2>Patterns found</h2>
       <div id="pats"><div class="pat-empty">Nothing forming in this window.</div></div>
+    </div>
+
+    <div class="panel" style="margin-bottom:18px">
+      <h2>Candlestick signals</h2>
+      <div id="candles"><div class="pat-empty">Nothing in this window.</div></div>
+    </div>
+
+    <div class="panel" style="margin-bottom:18px">
+      <h2>Momentum divergence</h2>
+      <div id="divs"><div class="pat-empty">None in this window.</div></div>
     </div>
 
     <div class="panel">
@@ -245,7 +258,7 @@ tr:last-child td{border-bottom:0}
 </div>
 
 <div class="note">
-  Every pair in the rail is scanned with the same six gates; the bars show how many opened. Click one to load it.
+  Every pair in the rail is scanned with the same seven gates; the bars show how many opened. Click one to load it.
   On the chart, the plan is drawn where you'd actually place it: entry line, stop below or above it, target at the
   nearest swing, and the two shaded zones are what you risk against what you're playing for. The volume profile on
   the right is built from the visible candles — the amber line is the point of control, the brighter bars are the
@@ -292,6 +305,21 @@ async function api(path){
 }
 const klines=(s,tf)=>api(`${P('/api/v3','/fapi/v1')}/klines?symbol=${s}&interval=${tf}&limit=320`)
   .then(j=>j.map(k=>({t:k[0],o:+k[1],h:+k[2],l:+k[3],c:+k[4],v:+k[5]})));
+
+/* ---------- higher-timeframe confluence ---------- */
+const HTF_MAP={'1m':'15m','3m':'30m','5m':'1h','15m':'4h','30m':'4h','1h':'4h','2h':'1d','4h':'1d','1d':'1w'};
+const HTF={};                            // sym -> {tf, long, short, price, e200}
+async function loadHTF(sym){
+  const tf=HTF_MAP[TF];
+  try{
+    const rows=await klines(sym,tf);
+    if(rows.length<210){HTF[sym]=null;return}
+    const c=rows.map(k=>k.c), n=c.length-1, e50=ema(c,50), e200=ema(c,200);
+    HTF[sym]={tf,long:c[n]>e200[n]&&e50[n]>e200[n],short:c[n]<e200[n]&&e50[n]<e200[n],price:c[n],e200:e200[n]};
+  }catch(e){HTF[sym]=null}
+  const en=cache[sym];
+  if(en&&!en.error){en.res=analyse(en.rows,sym);if(sym===active)renderMain();else renderWatch()}
+}
 
 /* ---------- indicators ---------- */
 const ema=(a,p)=>{const k=2/(p+1),o=[];let e=a[0];a.forEach((v,i)=>{e=i?v*k+e*(1-k):v;o.push(e)});return o};
@@ -368,6 +396,14 @@ function pivots(v,k=3){                 // swing points, then label them HH / HL
   const tag=(idx,key,a,b)=>idx.map((i,n)=>({i,p:v[i][key],
     t:n===0?'':(v[i][key]>v[idx[n-1]][key]?a:b)}));
   return {hi:tag(hi,'h','HH','LH'), lo:tag(lo,'l','HL','LL')};
+}
+function fibLevels(v){                  // retracement + extension off the last visible swing
+  let hiI=0,loI=0;
+  v.forEach((k,i)=>{if(k.h>v[hiI].h)hiI=i; if(k.l<v[loI].l)loI=i});
+  const hi=v[hiI].h, lo=v[loI].l, up=hiI>loI, rng=hi-lo||1e-9;
+  const at=r=>up?hi-rng*r:lo+rng*r;
+  const ratios=[0,.236,.382,.5,.618,.786,1,1.272,1.618];
+  return {up,hi,lo,hiI,loI,levels:ratios.map(r=>({r,p:at(r)}))};
 }
 
 /* ---------- chart patterns ---------- */
@@ -458,6 +494,70 @@ function detectPatterns(v,a){
   return out;
 }
 
+/* ---------- candlestick patterns ---------- */
+const bodyOf=k=>Math.abs(k.c-k.o), upWick=k=>k.h-Math.max(k.o,k.c), dnWick=k=>Math.min(k.o,k.c)-k.l;
+function ctxDown(v,i,len=8){                     // was price trending down into candle i?
+  const s=Math.max(0,i-len); if(s>=i) return false;
+  const avg=v.slice(s,i).reduce((x,y)=>x+y.c,0)/(i-s);
+  return v[i].c<avg;
+}
+const CNOTE={
+ 'Bullish Engulfing':'A full-bodied green candle swallows the prior red one — buyers took control.',
+ 'Bearish Engulfing':'A full-bodied red candle swallows the prior green one — sellers took control.',
+ 'Hammer':'Long lower wick after a decline — buyers stepped in and pushed it back up.',
+ 'Hanging Man':'Long lower wick after a rise — sellers tested control, needs confirmation.',
+ 'Shooting Star':'Long upper wick after a rise — buyers were rejected at the highs.',
+ 'Inverted Hammer':'Long upper wick after a decline — an early reversal attempt, needs confirmation.',
+ 'Doji':'Open and close almost equal — indecision after the prior move.',
+ 'Morning Star':'Down candle, small indecisive middle, strong up candle closing back above its midpoint.',
+ 'Evening Star':'Up candle, small indecisive middle, strong down candle closing back below its midpoint.'
+};
+function detectCandles(v,a){
+  const out=[], start=Math.max(2,v.length-30);
+  for(let i=start;i<v.length;i++){
+    const k=v[i], p=v[i-1], body=bodyOf(k), rng=(k.h-k.l)||1e-9, down=ctxDown(v,i);
+    const push=name=>out.push({name,kind:name==='Doji'?'neutral':
+        ['Bullish Engulfing','Hammer','Inverted Hammer','Morning Star'].includes(name)?'bullish':'bearish',
+      i,note:CNOTE[name]});
+    if(k.c>k.o&&p.c<p.o&&k.c>=p.o&&k.o<=p.c&&body>bodyOf(p)) push('Bullish Engulfing');
+    else if(k.c<k.o&&p.c>p.o&&k.o>=p.c&&k.c<=p.o&&body>bodyOf(p)) push('Bearish Engulfing');
+    else if(body<=rng*.1&&rng>=a*.3) push('Doji');
+    else if(dnWick(k)>=body*2&&upWick(k)<=body*.6&&body>0) push(down?'Hammer':'Hanging Man');
+    else if(upWick(k)>=body*2&&dnWick(k)<=body*.6&&body>0) push(down?'Inverted Hammer':'Shooting Star');
+    if(i>=start+2){
+      const a1=v[i-2],b1=v[i-1],c1=k, smallMid=bodyOf(b1)<bodyOf(a1)*.4;
+      if(a1.c<a1.o&&smallMid&&c1.c>c1.o&&c1.c>(a1.o+a1.c)/2) push('Morning Star');
+      if(a1.c>a1.o&&smallMid&&c1.c<c1.o&&c1.c<(a1.o+a1.c)/2) push('Evening Star');
+    }
+  }
+  return out.slice(-8);
+}
+
+/* ---------- divergence ---------- */
+function detectDivergence(v,R,M){
+  const P=pivots(v,3), out=[];
+  const H=P.hi.filter(x=>R[x.i]!=null), L=P.lo.filter(x=>R[x.i]!=null);
+  if(H.length>=2){
+    const [h1,h2]=H.slice(-2);
+    if(h2.p>h1.p&&R[h2.i]<R[h1.i])
+      out.push({name:'Bearish RSI divergence',kind:'bearish',src:'rsi',i1:h1.i,i2:h2.i,p1:h1.p,p2:h2.p,
+        v1:R[h1.i],v2:R[h2.i],note:'Price made a higher high while RSI made a lower high — momentum is fading into the move.'});
+    if(M[h1.i]!=null&&M[h2.i]!=null&&h2.p>h1.p&&M[h2.i]<M[h1.i])
+      out.push({name:'Bearish MACD divergence',kind:'bearish',src:'macd',i1:h1.i,i2:h2.i,p1:h1.p,p2:h2.p,
+        v1:M[h1.i],v2:M[h2.i],note:'Price made a higher high while the MACD histogram made a lower high.'});
+  }
+  if(L.length>=2){
+    const [l1,l2]=L.slice(-2);
+    if(l2.p<l1.p&&R[l2.i]>R[l1.i])
+      out.push({name:'Bullish RSI divergence',kind:'bullish',src:'rsi',i1:l1.i,i2:l2.i,p1:l1.p,p2:l2.p,
+        v1:R[l1.i],v2:R[l2.i],note:'Price made a lower low while RSI made a higher low — selling pressure is fading.'});
+    if(M[l1.i]!=null&&M[l2.i]!=null&&l2.p<l1.p&&M[l2.i]>M[l1.i])
+      out.push({name:'Bullish MACD divergence',kind:'bullish',src:'macd',i1:l1.i,i2:l2.i,p1:l1.p,p2:l2.p,
+        v1:M[l1.i],v2:M[l2.i],note:'Price made a lower low while the MACD histogram made a higher low.'});
+  }
+  return out;
+}
+
 /* ---------- volume profile ---------- */
 function volumeProfile(v,bins=48){
   let hi=-1e18,lo=1e18;
@@ -480,7 +580,7 @@ function volumeProfile(v,bins=48){
 }
 
 /* ---------- the rule set ---------- */
-function analyse(d){
+function analyse(d,sym){
   const c=d.map(k=>k.c),n=c.length-1;
   const e20=ema(c,20),e50=ema(c,50),e200=ema(c,200);
   const MF=macdFull(c),M=MF.hist,R=rsi(c),A=atr(d),BB=boll(c),VW=vwap(d),ST=supertrend(d),AX=adx(d);
@@ -493,7 +593,7 @@ function analyse(d){
   const vp=volumeProfile(d.slice(-110));
   const spot=document.getElementById('mode').value==='spot';
   if(spot&&!long){
-    return {e20,e50,e200,R,M,px,a,r,vol,dir:'Wait',long:false,spot:true,wait:true,
+    return {e20,e50,e200,R,M,px,a,r,vol,dir:'Wait',long:false,spot:true,wait:true,htf:HTF[sym],
       entry:px,stop:px,target:px,swingHi,swingLo,rr:0,riskPx:1,vp,inValue:px>=vp.val&&px<=vp.vah,block:0,
       BB,VW,MF,ST,AX,G:[{n:'Uptrend to buy into',ok:false,
           why:`Price is below the 200 EMA. On spot you can only profit going up, so there is no trade here — hold ${QUOTE} until price reclaims ${e200[n].toPrecision(6)}`}],
@@ -503,6 +603,11 @@ function analyse(d){
   const seg=vp.vol.filter((_,i)=>{const p=vp.price(i);return p>lo_&&p<hi_});
   const block=seg.length?Math.max(...seg)/vp.max:0;
   const inValue=px>=vp.val&&px<=vp.vah;
+  const htf=HTF[sym];
+  const htfOk=htf===undefined||htf===null?true:(long?htf.long:htf.short);
+  const htfWhy=htf===undefined?`${HTF_MAP[TF]} context loading…`
+    :htf===null?`${HTF_MAP[TF]} data unavailable — gate skipped`
+    :`${htf.tf} bias is ${htf.long?'long':htf.short?'short':'mixed'}, price ${htf.long?'above':htf.short?'below':'near'} its 200 EMA`;
   const G=[
     {n:'Trend agrees',ok:long?(px>e200[n]&&e50[n]>e200[n]):(px<e200[n]&&e50[n]<e200[n]),
      why:`Price ${long?'above':'below'} the 200 EMA, 50 EMA ${e50[n]>e200[n]?'above':'below'} it → bias ${dir.toLowerCase()}`},
@@ -515,15 +620,16 @@ function analyse(d){
     {n:'Target pays ≥ 2R',ok:rr>=2,
      why:`Nearest swing ${long?'high':'low'} gives ${rr.toFixed(2)}R against a 1.5 ATR stop`},
     {n:'Path to target is thin',ok:block<=.75,
-     why:`Heaviest volume node in the way is ${(block*100).toFixed(0)}% of the point of control (want ≤ 75%)`}
+     why:`Heaviest volume node in the way is ${(block*100).toFixed(0)}% of the point of control (want ≤ 75%)`},
+    {n:'Higher timeframe agrees',ok:htfOk,why:htfWhy}
   ];
-  return {e20,e50,e200,R,M,MF,BB,VW,ST,AX,px,a,r,vol,dir,long,entry,stop,target,swingHi,swingLo,rr,riskPx,G,vp,inValue,block,
+  return {e20,e50,e200,R,M,MF,BB,VW,ST,AX,px,a,r,vol,dir,long,entry,stop,target,swingHi,swingLo,rr,riskPx,G,vp,inValue,block,htf,
           passed:G.filter(g=>g.ok).length,chg:(c[n]/c[n-1]-1)*100};
 }
 
 /* ---------- chart ---------- */
 const N=110, PADR=64;
-let VIEW={n:110,off:0}, CROSS=null, PATTERNS=[];
+let VIEW={n:110,off:0}, CROSS=null, PATTERNS=[], CANDLES=[], DIVERGENCES=[];
 const pad2=x=>String(x).padStart(2,'0');
 const MON=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 function fmtT(ms,withDate){
@@ -575,6 +681,8 @@ function drawChart(d,s){
   if($('lEma').checked)[s.e20,s.e50,s.e200].forEach(a=>a.slice(st,en).forEach(x=>{hi=Math.max(hi,x);lo=Math.min(lo,x)}));
   if($('lPlan').checked)[s.entry,s.stop,s.target].forEach(p=>{hi=Math.max(hi,p);lo=Math.min(lo,p)});
   if($('lBB').checked)[s.BB.up,s.BB.dn].forEach(a=>a.slice(st,en).forEach(x=>{hi=Math.max(hi,x);lo=Math.min(lo,x)}));
+  const fib=fibLevels(v);
+  if($('lFib').checked)fib.levels.forEach(l=>{hi=Math.max(hi,l.p);lo=Math.min(lo,l.p)});
   const pad=(hi-lo)*.07;hi+=pad;lo-=pad;
   const Y=p=>H-14-(p-lo)/(hi-lo)*(H-28), X=i=>i/VN*PW+2, bw=Math.max(2,PW/VN*.62);
 
@@ -599,6 +707,17 @@ function drawChart(d,s){
     c.fillText('swing high',4,Y(s.swingHi)-8);c.fillText('swing low',4,Y(s.swingLo)+8);
   }
 
+  // fibonacci retracement / extension off the last visible swing
+  if($('lFib').checked){
+    fib.levels.forEach(l=>{
+      const y=Y(l.p), key=l.r===.5||l.r===.618, ext=l.r>1;
+      c.strokeStyle=ext?'rgba(217,164,65,.30)':key?'rgba(217,164,65,.55)':'rgba(111,134,166,.32)';
+      c.setLineDash(ext?[2,4]:[5,3]);c.beginPath();c.moveTo(0,y);c.lineTo(PW,y);c.stroke();c.setLineDash([]);
+      const txt=(l.r*100).toFixed(1)+'%';
+      c.fillStyle=key?'#D9A441':'#6F86A6';c.fillText(txt,4,y-(l.r===0||l.r===1?9:0));
+    });
+  }
+
   // volume profile — histogram anchored to the right, value area brighter, POC in amber
   if($('lVP').checked){
     const vp=vpD, W2=PW*.24, bh=Math.max(1,Math.abs(Y(vp.lo)-Y(vp.lo+vp.step))-1);
@@ -621,6 +740,17 @@ function drawChart(d,s){
     c.strokeStyle=c.fillStyle=up?'#5BC0A8':'#D2685F';
     c.beginPath();c.moveTo(x,Y(k.h));c.lineTo(x,Y(k.l));c.stroke();
     c.fillRect(X(i),Y(Math.max(k.o,k.c)),bw,Math.max(1,Math.abs(Y(k.o)-Y(k.c))))});
+
+  CANDLES = $('lCandle').checked ? detectCandles(v,s.a) : [];
+  CANDLES.forEach(cd=>{
+    const k=v[cd.i], x=X(cd.i)+bw/2;
+    const col=cd.kind==='bullish'?'#5BC0A8':cd.kind==='bearish'?'#D2685F':'#B98BD9';
+    c.fillStyle=col;c.beginPath();
+    if(cd.kind==='bearish'){const y=Y(k.h)-9;c.moveTo(x-4,y);c.lineTo(x+4,y);c.lineTo(x,y+7)}
+    else if(cd.kind==='bullish'){const y=Y(k.l)+9;c.moveTo(x-4,y);c.lineTo(x+4,y);c.lineTo(x,y-7)}
+    else{c.arc(x,Y(k.h)-11,2.5,0,7)}
+    c.fill();
+  });
 
   if($('lEma').checked){
     const line=(a,col,w)=>{c.strokeStyle=col;c.lineWidth=w;c.beginPath();
@@ -677,6 +807,18 @@ function drawChart(d,s){
     const w=c.measureText(pt.name).width+8;
     c.fillStyle=col;c.fillRect(Math.min(PW-w,lx-w/2),ly-20,w,15);
     c.fillStyle='#0A0E14';c.fillText(pt.name,Math.min(PW-w,lx-w/2)+4,ly-12);
+  });
+
+  DIVERGENCES = $('lDiv').checked ? detectDivergence(v,s.R.slice(st,en),s.M.slice(st,en)) : [];
+  DIVERGENCES.forEach(dv=>{
+    const col=dv.kind==='bullish'?'#5BC0A8':'#D2685F';
+    const x1=X(dv.i1)+bw/2,y1=Y(dv.p1),x2=X(dv.i2)+bw/2,y2=Y(dv.p2);
+    c.strokeStyle=col;c.lineWidth=1.4;c.setLineDash([2,3]);
+    c.beginPath();c.moveTo(x1,y1);c.lineTo(x2,y2);c.stroke();c.setLineDash([]);c.lineWidth=1;
+    [[x1,y1],[x2,y2]].forEach(([x,y])=>{c.beginPath();c.arc(x,y,2.5,0,7);c.fillStyle=col;c.fill()});
+    const label=dv.src==='rsi'?'RSI DIV':'MACD DIV', w=c.measureText(label).width+8;
+    c.fillStyle=col;c.fillRect(x2-w/2,y2-24,w,14);
+    c.fillStyle='#0A0E14';c.fillText(label,x2-w/2+4,y2-17);
   });
 
   // the plan itself
@@ -790,6 +932,11 @@ function drawMacd(s){
     a.forEach((q,i)=>i?c.lineTo(X(i)+bw/2,Y(q)):c.moveTo(X(i)+bw/2,Y(q)));c.stroke()};
   ln(m,'#E8E3D7');ln(g,'#D9A441');
   c.fillStyle='#7C8B9E';c.textBaseline='top';c.fillText('MACD 12/26/9',4,3);
+  if($('lDiv').checked)DIVERGENCES.filter(dv=>dv.src==='macd').forEach(dv=>{
+    const x1=X(dv.i1)+bw/2,y1=Y(dv.v1),x2=X(dv.i2)+bw/2,y2=Y(dv.v2),col=dv.kind==='bullish'?'#5BC0A8':'#D2685F';
+    c.strokeStyle=col;c.setLineDash([2,3]);c.beginPath();c.moveTo(x1,y1);c.lineTo(x2,y2);c.stroke();c.setLineDash([]);
+    [[x1,y1],[x2,y2]].forEach(([x,y])=>{c.beginPath();c.arc(x,y,2,0,7);c.fillStyle=col;c.fill()});
+  });
   if(CROSS!=null&&h[CROSS]!=null)crosshairLine(c,X(CROSS)+bw/2,H);
 }
 
@@ -803,6 +950,11 @@ function drawRsi(r){
     c.fillStyle='#7C8B9E';c.fillText(l,PW+7,y)});
   c.strokeStyle='#D9A441';c.beginPath();v.forEach((p,i)=>i?c.lineTo(X(i),Y(p)):c.moveTo(X(i),Y(p)));c.stroke();
   c.textBaseline='top';c.fillStyle='#7C8B9E';c.fillText('RSI 14',4,3);
+  if($('lDiv').checked)DIVERGENCES.filter(dv=>dv.src==='rsi').forEach(dv=>{
+    const x1=X(dv.i1),y1=Y(dv.v1),x2=X(dv.i2),y2=Y(dv.v2),col=dv.kind==='bullish'?'#5BC0A8':'#D2685F';
+    c.strokeStyle=col;c.setLineDash([2,3]);c.beginPath();c.moveTo(x1,y1);c.lineTo(x2,y2);c.stroke();c.setLineDash([]);
+    [[x1,y1],[x2,y2]].forEach(([x,y])=>{c.beginPath();c.arc(x,y,2,0,7);c.fillStyle=col;c.fill()});
+  });
   if(CROSS!=null&&v[CROSS]!=null){crosshairLine(c,X(CROSS),H);
     c.fillStyle='#D9A441';c.fillText(v[CROSS].toFixed(1),X(CROSS)+4,Y(v[CROSS])-14)}
 }
@@ -843,7 +995,8 @@ function renderMain(){
   $('stats').innerHTML=[['Bias',s.dir],['RSI 14',s.r.toFixed(1)],['ATR %',s.vol.toFixed(2)+'%'],
     ['ADX 14',s.AX.at(-1)?s.AX.at(-1).toFixed(1):'—'],['POC',s.vp.poc.toPrecision(6)],
     ['VAH',s.vp.vah.toPrecision(6)],['VAL',s.vp.val.toPrecision(6)],
-    ['Price',s.inValue?'in value':(s.px>s.vp.vah?'above value':'below value')]]
+    ['Price',s.inValue?'in value':(s.px>s.vp.vah?'above value':'below value')],
+    ['Higher TF',s.htf===undefined?'loading…':s.htf===null?'n/a':`${s.htf.tf} ${s.htf.long?'long':s.htf.short?'short':'mixed'}`]]
     .map(([k,v])=>`<div class="stat"><span>${k}</span><b>${v}</b></div>`).join('');
   $('gates').innerHTML=s.G.map(g=>`<li class="gate ${g.ok?'on':'off'}"><div class="dot">${g.ok?'✓':'✕'}</div>
     <div class="name">${g.n}</div><div class="why">${g.why}</div></li>`).join('');
@@ -877,7 +1030,8 @@ async function load(sym){
   try{
     const rows=await klines(sym,TF);
     if(rows.length<210) throw new Error('not enough history for a 200 EMA');
-    cache[sym]={rows,res:analyse(rows)};
+    cache[sym]={rows,res:analyse(rows,sym)};
+    loadHTF(sym);
   }catch(e){cache[sym]={error:sym+': '+e.message}}
 }
 async function scanAll(){
@@ -905,9 +1059,9 @@ $('newpair').addEventListener('keydown',e=>{if(e.key==='Enter')addPair()});
 $('rescan').onclick=()=>{Object.keys(cache).forEach(k=>delete cache[k]);scanAll()};
 $('tf').addEventListener('change',()=>{VIEW={n:110,off:0}});
 $('mode').onchange=()=>{VIEW={n:110,off:0};Object.keys(cache).forEach(k=>delete cache[k]);scanAll()};
-$('tf').onchange=()=>{TF=$('tf').value;Object.keys(cache).forEach(k=>delete cache[k]);scanAll()};
+$('tf').onchange=()=>{TF=$('tf').value;Object.keys(cache).forEach(k=>delete cache[k]);Object.keys(HTF).forEach(k=>delete HTF[k]);scanAll()};
 ['acct','rp','fee','slip'].forEach(id=>$(id).addEventListener('input',renderMain));
-['lPlan','lSwing','lEma','lBands','lVP','lVWAP','lBB','lStruct','lST','lMACD','lPat'].forEach(id=>$(id).addEventListener('change',renderMain));
+['lPlan','lSwing','lEma','lBands','lVP','lVWAP','lBB','lStruct','lST','lMACD','lPat','lFib','lCandle','lDiv'].forEach(id=>$(id).addEventListener('change',renderMain));
 addEventListener('resize',renderMain);
 
 function pos(){
@@ -1012,6 +1166,14 @@ function redraw(){
         <div class="lv">trigger ${p.level.toPrecision(6)} · measured move ${p.target.toPrecision(6)}</div>
         <div class="nt">${p.note}</div></div>`}).join('')
     : '<div class="pat-empty">Nothing forming in this window.</div>';
+  $('candles').innerHTML = CANDLES.length ? CANDLES.slice().reverse().map(cd=>{
+      const k=cd.kind==='bullish'?'bull':cd.kind==='bearish'?'bear':'neut';
+      return `<div class="pat ${k}"><b>${cd.name}</b><div class="nt">${cd.note}</div></div>`}).join('')
+    : '<div class="pat-empty">Nothing in this window.</div>';
+  $('divs').innerHTML = DIVERGENCES.length ? DIVERGENCES.map(dv=>{
+      const k=dv.kind==='bullish'?'bull':'bear';
+      return `<div class="pat ${k}"><b>${dv.name}</b><div class="nt">${dv.note}</div></div>`}).join('')
+    : '<div class="pat-empty">None in this window.</div>';
   $('zoomtxt').textContent=`· ${VIEW.n} bars${VIEW.off?' · '+VIEW.off+' back':''}`;
 }
 (function gestures(){
@@ -1101,7 +1263,7 @@ function connect(){
 setInterval(()=>{
   if(!dirty.size)return;
   const wasActive=dirty.has(active);
-  dirty.forEach(s=>{const e=cache[s];if(e&&!e.error)e.res=analyse(e.rows)});
+  dirty.forEach(s=>{const e=cache[s];if(e&&!e.error)e.res=analyse(e.rows,s)});
   dirty.clear();
   wasActive?renderMain():renderWatch();
 },700);
