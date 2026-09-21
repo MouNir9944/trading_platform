@@ -12,8 +12,17 @@ async function getJson(path) {
   return res.json();
 }
 
-export function getPrice(symbol = "XLMUSDT") {
-  return getJson(`/market/price?symbol=${symbol}`);
+export function getPrice(symbol = "XLMUSDT", market = "spot") {
+  return getJson(`/market/price?symbol=${symbol}&market=${market}`);
+}
+
+/** `source: "live"` reads live public data whatever the account mode is. */
+export function getMarketOverview(quote = "USDT", market = "spot", source) {
+  return getJson(`/market/overview?quote=${quote}&market=${market}${source ? `&source=${source}` : ""}`);
+}
+
+export function getStatus() {
+  return getJson(`/status`);
 }
 
 export function getBalance() {
@@ -45,8 +54,9 @@ export function getSignal(symbol = "XLMUSDT", interval = "1h", capitalUsdt = 100
   return getJson(`/strategy/signal?symbol=${symbol}&interval=${interval}&capital_usdt=${capitalUsdt}`);
 }
 
-export function getCandles(symbol = "XLMUSDT", interval = "1h", limit = 100) {
-  return getJson(`/market/candles?symbol=${symbol}&interval=${interval}&limit=${limit}`);
+export function getCandles(symbol = "XLMUSDT", interval = "1h", limit = 100, endTime, market = "spot", source) {
+  const before = endTime ? `&end_time=${endTime}` : "";
+  return getJson(`/market/candles?symbol=${symbol}&interval=${interval}&limit=${limit}${before}&market=${market}${source ? `&source=${source}` : ""}`);
 }
 
 export function getSymbols(quote = "USDT") {
@@ -137,3 +147,57 @@ export async function clearOrderHistory() {
   }
   return res.json();
 }
+
+export function getRisk(market = "spot") {
+  return getJson(`/risk?market=${market}`);
+}
+
+async function sendJson(path, method, body) {
+  const res = await fetch(`${BASE}${path}`, { method, headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `Request failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export const updateRisk = (patch, market = "spot") => sendJson(`/risk?market=${market}`, "PUT", patch);
+export const resetRiskDrawdown = (market = "spot") => sendJson(`/risk/reset-drawdown?market=${market}`, "POST");
+
+// ---- futures trading ----
+export const getFuturesAccount = (mode = "testnet") => getJson(`/futures/account?mode=${mode}`);
+export const getFuturesOrders = (mode = "testnet") => getJson(`/futures/orders?mode=${mode}`);
+export const createFuturesOrder = (order) => sendJson("/futures/orders", "POST", order);
+export const cancelFuturesOrder = (orderId) => sendJson(`/futures/orders/${orderId}`, "DELETE");
+export const deleteFuturesOrderHistory = (orderId) => sendJson(`/futures/orders/${orderId}/history`, "DELETE");
+export const clearFuturesOrderHistory = () => sendJson("/futures/orders/history", "DELETE");
+export const closeFuturesPosition = (symbol) => sendJson("/futures/positions/close", "POST", { symbol });
+
+export function getSymbolInfo(symbol, market = "spot") {
+  return getJson(`/market/symbol-info?symbol=${symbol}&market=${market}`);
+}
+
+// ---- Binance Stocks (live account only) ----
+export const getStockPortfolio = () => getJson("/stocks/portfolio");
+export const getStockSymbols = () => getJson("/stocks/symbols");
+export const getStockQuote = (symbol) => getJson(`/stocks/quote?symbol=${encodeURIComponent(symbol)}`);
+export const getStockOrders = () => getJson("/stocks/orders");
+export const placeStockOrder = (order) => sendJson("/stocks/orders", "POST", order);
+export const cancelStockOrder = (orderId) => sendJson(`/stocks/orders/${encodeURIComponent(orderId)}`, "DELETE");
+export const searchStocks = (q) => getJson(`/stocks/search?q=${encodeURIComponent(q)}`);
+export const getStockHistory = (symbol) => getJson(`/stocks/history?symbol=${encodeURIComponent(symbol)}`);
+export const getStockCompany = (symbol) => getJson(`/stocks/company?symbol=${encodeURIComponent(symbol)}`);
+
+// ---- economic news ----
+export const getNews = (days = 7) => getJson(`/news?days=${days}`);
+export const getNewsCalendar = () => getJson("/news/calendar");
+
+// ---- AMD bot, backtest and notifications ----
+export const getNotifications = (since = 0, limit = 50) => getJson(`/notifications?since=${since}&limit=${limit}`);
+export const markNotificationsRead = (ids = null) => sendJson("/notifications/read", "POST", ids ? { ids } : {});
+export const sendTestNotification = () => sendJson("/notifications/test", "POST");
+export const getAmdStatus = () => getJson("/amd/status");
+export const putAmdConfig = (patch) => sendJson("/amd/config", "PUT", patch);
+export const scanAmdNow = () => sendJson("/amd/scan", "POST");
+export const getAmdLog = (limit = 50) => getJson(`/amd/log?limit=${limit}`);
+export const runAmdBacktest = (body) => sendJson("/amd/backtest", "POST", body);

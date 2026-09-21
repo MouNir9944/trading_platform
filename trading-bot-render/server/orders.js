@@ -4,20 +4,28 @@
  * loops instead of threads and resume from the persisted store on startup.
  */
 import crypto from "node:crypto";
-import fs from "node:fs";
 
-import { dataPath, writeFileSafe } from "./config.js";
+import { RISK_DEFAULTS, checkOrder, computeCapital, computeRiskState, normalizeSettings } from "../shared/risk.js";
 import { decimalString, formatDecimal } from "./decimal.js";
 
 const DEFAULT_TRADING_FEE_PERCENT = 0.1;
 const STOP_LIMIT_BUFFER_PERCENT = 0.1;
 const ACTIVE = new Set(["WAITING_ENTRY", "PROTECTED", "MODIFYING"]);
 const POLL_MS = 5000;
+const DEFAULT_LIMITS = { max_open_orders: 1, max_daily_orders: 5 };
 
 // unref'd: an idle poll timer must never keep the process (or a test run) alive on its own.
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms).unref());
 const round2 = (n) => Math.round(n * 100) / 100;
 const isUnknownOrder = (err) => /-2011|Unknown order/.test(String(err?.message ?? err));
+
+/** Thrown when the risk rules refuse an order. `violations` lists every broken rule. */
+export class RiskBlockedError extends Error {
+  constructor(message, violations) {
+    super(message);
+    this.violations = violations;
+  }
+}
 
 export class OrderManager {
   /**
@@ -25,17 +33,61 @@ export class OrderManager {
    * @param {(mode?: string) => object} deps.getClient
    * @param {() => string} deps.getMode
    * @param {(client, symbol) => Promise<{maker_percent: number, taker_percent: number}>} deps.getTradingFee
+   * @param {import("./store.js").FileStore | import("./store.js").MongoStore} deps.store
    */
-  constructor({ getClient, getMode, getTradingFee, storePath, limitsPath, pollMs = POLL_MS }) {
+  constructor({ getClient, getMode, getTradingFee, store, pollMs = POLL_MS }) {
     this.getClient = getClient;
     this.getMode = getMode;
     this.getTradingFee = getTradingFee;
-    this.storePath = storePath ?? dataPath("orders.json");
-    this.limitsPath = limitsPath ?? dataPath("order_limits.json");
+    this.store = store;
     this.pollMs = pollMs;
     this.stopped = false;
-    this.limits = this.#loadLimits();
-    this.orders = this.#load();
+    this.limits = { ...DEFAULT_LIMITS };
+    this.riskSettings = { ...RISK_DEFAULTS };
+    this.orders = {};
+    this.writeQueue = Promise.resolve();
+  }
+
+  /** Load persisted orders and limits. Call before start(). */
+  async init() {
+    // Futures orders live in the same store but belong to the FuturesManager.
+    this.orders = Object.fromEntries((await this.store.loadOrders()).filter((order) => order.market !== "futures").map((order) => [order.id, order]));
+    this.limits = { ...DEFAULT_LIMITS, ...((await this.store.getSetting("limits")) ?? {}) };
+    try {
+      this.riskSettings = normalizeSettings((await this.store.getSetting("risk")) ?? {});
+    } catch (err) {
+      console.error(`Ignoring invalid saved risk settings: ${err.message}`);
+    }
+  }
+
+  // ---- risk management ----
+  getRiskSettings() {
+    return { ...this.riskSettings };
+  }
+
+  /** Validate and persist a partial settings update. Takes effect on the next order. */
+  setRiskSettings(patch) {
+    this.riskSettings = normalizeSettings(patch, this.riskSettings);
+    this.#queue(() => this.store.setSetting("risk", { ...this.riskSettings }));
+    return this.getRiskSettings();
+  }
+
+  /** Measure drawdown from now on (after the user has reviewed a drawdown halt). */
+  resetDrawdown() {
+    return this.setRiskSettings({ drawdownResetAt: new Date().toISOString() });
+  }
+
+  /** Where the given account mode stands against every limit. `quoteTotal` is the quote-asset balance. */
+  getRiskState(mode, quoteTotal, now = Date.now()) {
+    const orders = this.listOrders(mode);
+    const settings = this.getRiskSettings();
+    const capital = computeCapital(settings, { quoteTotal, orders });
+    return computeRiskState({ orders, settings, capital, now });
+  }
+
+  /** Resolves once every queued database write has finished. */
+  flush() {
+    return this.writeQueue;
   }
 
   /** Resume monitoring anything that was in flight when the process last stopped. */
@@ -44,7 +96,7 @@ export class OrderManager {
       if (order.status === "MODIFYING") {
         order.status = "ERROR";
         order.message = "Entry price update was interrupted; cancel or place a new order";
-        this.#save();
+        this.#save(order.id);
       } else if (order.status === "WAITING_ENTRY" || order.status === "PROTECTED") {
         this.#spawnMonitor(order.id);
       }
@@ -70,7 +122,7 @@ export class OrderManager {
     const validDaily = Number.isInteger(maxDailyOrders) && maxDailyOrders >= 1 && maxDailyOrders <= 500;
     if (!validOpen || !validDaily) throw new Error("Limits are outside the allowed range");
     this.limits = { max_open_orders: maxOpenOrders, max_daily_orders: maxDailyOrders };
-    writeFileSafe(this.limitsPath, JSON.stringify(this.limits, null, 2));
+    this.#queue(() => this.store.setSetting("limits", { ...this.limits }));
     return { ...this.limits };
   }
 
@@ -84,7 +136,8 @@ export class OrderManager {
     const stopLossPrice = formatDecimal(stop_loss_price, info.tickSize);
     const takeProfitPrice = formatDecimal(take_profit_price, info.tickSize);
 
-    if (capital_usdt > (await getFreeBalance(client, info.quoteAsset))) {
+    const balance = await getQuoteBalance(client, info.quoteAsset);
+    if (capital_usdt > balance.free) {
       throw new Error(`Insufficient ${info.quoteAsset} balance for a ${capital_usdt.toFixed(2)} USDT order`);
     }
     const quantity = formatDecimal((capital_usdt * (1 - feePercent / 100)) / entryPrice, info.stepSize);
@@ -92,7 +145,25 @@ export class OrderManager {
     if (!(stopLossPrice < entryPrice && entryPrice < takeProfitPrice)) {
       throw new Error("Prices must satisfy stop-loss < entry < take-profit");
     }
-    if (quantity <= 0) throw new Error("Quantity is below the exchange lot-size minimum");
+    if (quantity <= 0 || quantity < info.minQty) throw new Error("Quantity is below the exchange lot-size minimum");
+    const orderValue = entryPrice * quantity;
+    if (info.minNotional > 0 && orderValue < info.minNotional) {
+      throw new Error(`Order value ${orderValue.toFixed(2)} ${info.quoteAsset} is below Binance's minimum of ${info.minNotional} ${info.quoteAsset} for ${symbol}. Use a larger size (this is an exchange rule, not a risk rule).`);
+    }
+
+    // Risk rules are enforced here, on the server, so no client can bypass them.
+    const state = this.getRiskState(accountMode, balance.free + balance.locked);
+    const verdict = checkOrder({
+      settings: this.riskSettings,
+      state,
+      order: { entry: entryPrice, stop: stopLossPrice, target: takeProfitPrice, quantity, feePercent },
+    });
+    if (!verdict.allowed) {
+      const size = verdict.suggestedPositionValue > 0 && verdict.violations.every((v) => ["risk_per_trade", "position_size", "open_risk"].includes(v.code))
+        ? ` Largest position that fits your limits with this stop: about ${verdict.suggestedPositionValue.toFixed(2)} USDT.`
+        : "";
+      throw new RiskBlockedError(`Risk check blocked this order. ${verdict.violations.map((v) => v.message).join(" ")}${size}`, verdict.violations);
+    }
 
     const order = {
       id: crypto.randomUUID().replace(/-/g, "").slice(0, 12),
@@ -126,7 +197,8 @@ export class OrderManager {
     order.entry_order_id = String(entry.orderId);
     order.status = "WAITING_ENTRY";
     this.orders[order.id] = order;
-    this.#save();
+    // The Binance order already exists, so a database hiccup must not stop the monitor from starting.
+    await this.#save(order.id);
 
     this.#spawnMonitor(order.id);
     return { ...order };
@@ -268,19 +340,17 @@ export class OrderManager {
     if (!order) throw new Error("Order not found");
     if (ACTIVE.has(order.status)) throw new Error("Cancel the active Binance order before deleting it");
     delete this.orders[orderId];
-    this.#save();
+    this.#queue(() => this.store.removeOrders([orderId]));
     return { deleted: orderId };
   }
 
   clearHistory(accountMode) {
-    const before = Object.keys(this.orders).length;
-    this.orders = Object.fromEntries(
-      Object.entries(this.orders).filter(
-        ([, order]) => ACTIVE.has(order.status) || (accountMode && order.account_mode !== accountMode),
-      ),
-    );
-    this.#save();
-    return { deleted: before - Object.keys(this.orders).length };
+    const removed = Object.values(this.orders)
+      .filter((order) => !ACTIVE.has(order.status) && (!accountMode || order.account_mode === accountMode))
+      .map((order) => order.id);
+    for (const id of removed) delete this.orders[id];
+    this.#queue(() => this.store.removeOrders(removed));
+    return { deleted: removed.length };
   }
 
   async cleanupAllAccounts() {
@@ -301,8 +371,9 @@ export class OrderManager {
         errors.push({ mode, error: err.message });
       }
     }
+    const removed = Object.keys(this.orders);
     this.orders = {};
-    this.#save();
+    this.#queue(() => this.store.removeOrders(removed));
     return { cancelled, errors };
   }
 
@@ -435,8 +506,10 @@ export class OrderManager {
   }
 
   #update(orderId, changes) {
+    // Remember when a trade closed: the daily-loss and loss-streak rules depend on it.
+    if (changes.status === "CLOSED") changes = { closed_at: new Date().toISOString(), ...changes };
     Object.assign(this.#get(orderId), changes);
-    this.#save();
+    this.#save(orderId);
   }
 
   async #feePercent(client, symbol) {
@@ -448,26 +521,17 @@ export class OrderManager {
     }
   }
 
-  #load() {
-    try {
-      const saved = JSON.parse(fs.readFileSync(this.storePath, "utf-8"));
-      return Object.fromEntries(saved.map((item) => [item.id, item]));
-    } catch {
-      return {};
-    }
+  /** Persist a snapshot of one order; writes run strictly in order so the last state always wins. */
+  #save(orderId) {
+    const snapshot = { ...this.orders[orderId] };
+    return this.#queue(() => this.store.saveOrder(snapshot));
   }
 
-  #loadLimits() {
-    const defaults = { max_open_orders: 1, max_daily_orders: 5 };
-    try {
-      return { ...defaults, ...JSON.parse(fs.readFileSync(this.limitsPath, "utf-8")) };
-    } catch {
-      return defaults;
-    }
-  }
-
-  #save() {
-    writeFileSafe(this.storePath, JSON.stringify(Object.values(this.orders), null, 2));
+  #queue(write) {
+    this.writeQueue = this.writeQueue
+      .then(write)
+      .catch((err) => console.error(`Database write failed: ${err.message}`));
+    return this.writeQueue;
   }
 }
 
@@ -501,14 +565,17 @@ export async function getSymbolInfo(client, symbol) {
   return {
     tickSize: Number(filters.PRICE_FILTER.tickSize),
     stepSize: Number(filters.LOT_SIZE.stepSize),
+    minQty: Number(filters.LOT_SIZE.minQty ?? 0),
+    // Binance calls this NOTIONAL (newer) or MIN_NOTIONAL (older): the smallest order value it accepts.
+    minNotional: Number(filters.NOTIONAL?.minNotional ?? filters.MIN_NOTIONAL?.minNotional ?? 0),
     quoteAsset: info.quoteAsset,
   };
 }
 
-async function getFreeBalance(client, asset) {
+async function getQuoteBalance(client, asset) {
   const account = await client.getAccount();
   const balance = account.balances.find((b) => b.asset === asset);
-  return balance ? Number(balance.free) : 0;
+  return { free: balance ? Number(balance.free) : 0, locked: balance ? Number(balance.locked) : 0 };
 }
 
 /** Cancel a Spot OCO via the order-list endpoint, falling back to its child orders. */

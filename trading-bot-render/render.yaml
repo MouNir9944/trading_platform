@@ -2,28 +2,27 @@ services:
   - type: web
     name: trading-bot-dashboard
     runtime: node
-    # Starter (always-on) + disk on purpose: the order monitor must keep running after a
-    # limit BUY fills so the stop-loss/take-profit OCO gets placed. Free web services
-    # spin down when idle, which would leave a filled entry unprotected.
+    region: frankfurt # Binance blocks US IPs (Ohio/Oregon)
+    # Always-on plan on purpose: the order monitor must keep running after a limit BUY fills so the
+    # stop-loss/take-profit OCO gets placed. Free web services sleep when idle.
     plan: starter
     buildCommand: npm install --include=dev && npm run build
     startCommand: npm start
     healthCheckPath: /healthz
-    disk:
-      name: bot-data
-      mountPath: /var/data
-      sizeGB: 1
     envVars:
       - key: NODE_VERSION
         value: 22
-      - key: DATA_DIR
-        value: /var/data
       - key: BINANCE_TESTNET
         value: "true"
       - key: TRADING_SYMBOL
         value: XLMUSDT
       - key: APP_USERNAME
         value: admin
+      - key: MONGODB_DB
+        value: trading_bot
+      # Secrets: Render prompts for these on first deploy.
+      - key: MONGODB_URI
+        sync: false
       - key: APP_PASSWORD
         sync: false
       - key: BINANCE_API_KEY

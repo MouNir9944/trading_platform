@@ -3,15 +3,13 @@
  * Replaces python-binance: only the endpoints this app uses are implemented.
  */
 import crypto from "node:crypto";
-import fs from "node:fs";
 
-import { assertMode, dataPath, writeFileSafe } from "./config.js";
+import { assertMode, MODES } from "./config.js";
 
 const BASE_URLS = {
   testnet: "https://testnet.binance.vision",
   live: "https://api.binance.com",
 };
-const MODE_FILE = dataPath("account_mode.txt");
 const DEFAULT_MODE = (process.env.BINANCE_TESTNET ?? "true").toLowerCase() === "true" ? "testnet" : "live";
 export const DEFAULT_SYMBOL = process.env.TRADING_SYMBOL || "XLMUSDT";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -25,17 +23,21 @@ export class BinanceError extends Error {
   }
 }
 
-export function getMode() {
-  try {
-    const mode = fs.readFileSync(MODE_FILE, "utf-8").trim().toLowerCase();
-    return mode === "testnet" || mode === "live" ? mode : DEFAULT_MODE;
-  } catch {
-    return DEFAULT_MODE;
-  }
+let currentMode = DEFAULT_MODE;
+let modeStore = null;
+
+/** Load the last saved account mode; call once at startup before serving requests. */
+export async function initMode(store) {
+  modeStore = store;
+  const saved = await store.getSetting("account_mode");
+  if (MODES.includes(saved)) currentMode = saved;
 }
 
+export const getMode = () => currentMode;
+
 export function setMode(mode) {
-  writeFileSafe(MODE_FILE, assertMode(mode));
+  currentMode = assertMode(mode);
+  modeStore?.setSetting("account_mode", mode).catch((err) => console.error("Could not save account mode:", err.message));
   return mode;
 }
 
@@ -72,6 +74,11 @@ export class BinanceClient {
     this.bannedUntil = 0; // epoch ms; while in the future, no request is sent
   }
 
+  /** API key pair for signed requests. Futures clients override this. */
+  credentials() {
+    return credentials(this.mode);
+  }
+
   async request(method, path, params = {}, { signed = false } = {}) {
     const query = new URLSearchParams();
     for (const [key, value] of Object.entries(params)) {
@@ -85,7 +92,7 @@ export class BinanceClient {
     }
     const headers = {};
     if (signed) {
-      const { key, secret } = credentials(this.mode);
+      const { key, secret } = this.credentials();
       await this.syncTime();
       query.set("recvWindow", String(RECV_WINDOW));
       query.set("timestamp", String(Date.now() + this.timeOffset));
@@ -140,7 +147,7 @@ export class BinanceClient {
   async syncTime() {
     if (Date.now() - this.offsetSyncedAt < 10 * 60_000) return;
     try {
-      const { serverTime } = await this.request("GET", "/api/v3/time");
+      const { serverTime } = await this.request("GET", this.timePath ?? "/api/v3/time");
       this.timeOffset = serverTime - Date.now();
       this.offsetSyncedAt = Date.now();
     } catch {
@@ -152,8 +159,12 @@ export class BinanceClient {
   getSymbolTicker(symbol) {
     return this.request("GET", "/api/v3/ticker/price", { symbol });
   }
-  getKlines(symbol, interval, limit) {
-    return this.request("GET", "/api/v3/klines", { symbol, interval, limit });
+  getKlines(symbol, interval, limit, endTime) {
+    return this.request("GET", "/api/v3/klines", { symbol, interval, limit, endTime });
+  }
+  /** 24h stats for every symbol (weight ~80, so callers cache it). */
+  getTicker24h() {
+    return this.request("GET", "/api/v3/ticker/24hr");
   }
   getExchangeInfo(symbol) {
     return this.request("GET", "/api/v3/exchangeInfo", { symbol });
@@ -215,6 +226,169 @@ export class BinanceClient {
   }
 }
 
+/**
+ * Public USD-M Futures market data (klines, tickers, contract list). Read-only: no keys are used and signed
+ * requests are refused, so this client can never place or change an order.
+ */
+export class FuturesClient extends BinanceClient {
+  constructor() {
+    super("live");
+    this.baseUrl = "https://fapi.binance.com";
+  }
+
+  request(method, path, params = {}, options = {}) {
+    if (options.signed) throw new Error("Futures trading is not enabled: this client is read-only.");
+    return super.request(method, path, params, options);
+  }
+
+  getSymbolTicker(symbol) {
+    return this.request("GET", "/fapi/v1/ticker/price", { symbol });
+  }
+  getKlines(symbol, interval, limit, endTime) {
+    return this.request("GET", "/fapi/v1/klines", { symbol, interval, limit, endTime });
+  }
+  getExchangeInfo() {
+    return this.request("GET", "/fapi/v1/exchangeInfo");
+  }
+  getTicker24h() {
+    return this.request("GET", "/fapi/v1/ticker/24hr");
+  }
+  /** Best bid/ask for every contract (the 24h ticker has no spread). */
+  getBookTickers() {
+    return this.request("GET", "/fapi/v1/ticker/bookTicker");
+  }
+}
+
+/**
+ * Authenticated USD-M Futures client (Binance futures demo/testnet or live). Only what the trading flow needs.
+ *
+ * Testnet uses the futures demo host and its own API keys (BINANCE_FUTURES_API_KEY / _SECRET): the Spot testnet
+ * keys do not work there. Live uses BINANCE_FUTURES_API_KEY_real, falling back to the live Spot key pair when
+ * that key has Futures enabled.
+ *
+ * Conditional orders (stop-loss / take-profit) go through Binance's Algo Order endpoints: the regular order
+ * endpoint no longer accepts STOP_MARKET / TAKE_PROFIT_MARKET.
+ */
+const FUTURES_URLS = {
+  testnet: process.env.BINANCE_FUTURES_TESTNET_URL || "https://demo-fapi.binance.com",
+  live: "https://fapi.binance.com",
+};
+
+export class FuturesTradingClient extends BinanceClient {
+  constructor(mode) {
+    super(mode);
+    this.baseUrl = FUTURES_URLS[mode];
+    this.timePath = "/fapi/v1/time";
+  }
+
+  credentials() {
+    const env = process.env;
+    const [key, secret] = isTestnet(this.mode)
+      ? [env.BINANCE_FUTURES_API_KEY, env.BINANCE_FUTURES_API_SECRET]
+      : [
+          env.BINANCE_FUTURES_API_KEY_real || env.BINANCE_API_KEY_real || env.BINANCE_API_KEY_REAL,
+          env.BINANCE_FUTURES_API_SECRET_real || env.BINANCE_API_SECRET_real || env.BINANCE_API_SECRET_REAL,
+        ];
+    if (!key || !secret) {
+      throw new Error(
+        isTestnet(this.mode)
+          ? "Missing Binance futures testnet credentials. Set BINANCE_FUTURES_API_KEY and BINANCE_FUTURES_API_SECRET (the Spot testnet keys do not work for futures)."
+          : "Missing Binance live futures credentials. Set BINANCE_FUTURES_API_KEY_real and BINANCE_FUTURES_API_SECRET_real, or enable Futures on your live key.",
+      );
+    }
+    return { key, secret };
+  }
+
+  // ---- public ----
+  getSymbolTicker(symbol) {
+    return this.request("GET", "/fapi/v1/ticker/price", { symbol });
+  }
+  getKlines(symbol, interval, limit, endTime) {
+    return this.request("GET", "/fapi/v1/klines", { symbol, interval, limit, endTime });
+  }
+  getExchangeInfo() {
+    return this.request("GET", "/fapi/v1/exchangeInfo");
+  }
+
+  // ---- account ----
+  getBalance() {
+    return this.request("GET", "/fapi/v2/balance", {}, { signed: true });
+  }
+  /** Every position (or one symbol's): leverage, margin type, liquidation price, unrealized profit. */
+  async getPositions(symbol) {
+    try {
+      return await this.request("GET", "/fapi/v2/positionRisk", { symbol }, { signed: true });
+    } catch (err) {
+      if (err.status !== 404) throw err;
+      return this.request("GET", "/fapi/v3/positionRisk", { symbol }, { signed: true });
+    }
+  }
+  /** `{dualSidePosition: true}` means Hedge Mode, which this app does not support. */
+  getPositionMode() {
+    return this.request("GET", "/fapi/v1/positionSide/dual", {}, { signed: true });
+  }
+  changeMarginType(symbol, marginType) {
+    return this.request("POST", "/fapi/v1/marginType", { symbol, marginType }, { signed: true });
+  }
+  changeLeverage(symbol, leverage) {
+    return this.request("POST", "/fapi/v1/leverage", { symbol, leverage }, { signed: true });
+  }
+  async getCommission(symbol) {
+    const rates = await this.request("GET", "/fapi/v1/commissionRate", { symbol }, { signed: true });
+    return { maker_percent: Number(rates.makerCommissionRate) * 100, taker_percent: Number(rates.takerCommissionRate) * 100 };
+  }
+
+  // ---- regular orders (entry, market close) ----
+  createOrder(params) {
+    return this.request("POST", "/fapi/v1/order", params, { signed: true });
+  }
+  getOrder(symbol, orderId) {
+    return this.request("GET", "/fapi/v1/order", { symbol, orderId }, { signed: true });
+  }
+  cancelOrder(symbol, orderId) {
+    return this.request("DELETE", "/fapi/v1/order", { symbol, orderId }, { signed: true });
+  }
+  getOpenOrders(symbol) {
+    return this.request("GET", "/fapi/v1/openOrders", { symbol }, { signed: true });
+  }
+  cancelAllOpenOrders(symbol) {
+    return this.request("DELETE", "/fapi/v1/allOpenOrders", { symbol }, { signed: true });
+  }
+  getUserTrades(symbol, startTime) {
+    return this.request("GET", "/fapi/v1/userTrades", { symbol, startTime, limit: 1000 }, { signed: true });
+  }
+
+  // ---- conditional orders (stop-loss / take-profit) ----
+  /** STOP_MARKET or TAKE_PROFIT_MARKET that closes the whole position when the trigger price is reached. */
+  createCloseTrigger({ symbol, side, type, triggerPrice }) {
+    return this.request(
+      "POST",
+      "/fapi/v1/algoOrder",
+      { algoType: "CONDITIONAL", symbol, side, type, triggerPrice, closePosition: "true", workingType: "MARK_PRICE" },
+      { signed: true },
+    );
+  }
+  getAlgoOrder(algoId) {
+    return this.request("GET", "/fapi/v1/algoOrder", { algoId }, { signed: true });
+  }
+  cancelAlgoOrder(algoId) {
+    return this.request("DELETE", "/fapi/v1/algoOrder", { algoId }, { signed: true });
+  }
+  cancelAllAlgoOrders(symbol) {
+    return this.request("DELETE", "/fapi/v1/algoOpenOrders", { symbol }, { signed: true });
+  }
+}
+
+const futuresTraders = new Map();
+export function getFuturesTrader(mode = getMode()) {
+  assertMode(mode);
+  if (!futuresTraders.has(mode)) futuresTraders.set(mode, new FuturesTradingClient(mode));
+  return futuresTraders.get(mode);
+}
+
+let futuresClient = null;
+export const getFuturesClient = () => (futuresClient ??= new FuturesClient());
+
 // ---- helpers mirroring binance_client.py ----
 export async function getAccountBalance(client) {
   const account = await client.getAccount();
@@ -225,7 +399,7 @@ export async function getCurrentPrice(client, symbol = DEFAULT_SYMBOL) {
   return Number((await client.getSymbolTicker(symbol)).price);
 }
 
-export const getRecentCandles = (client, symbol = DEFAULT_SYMBOL, interval = "1h", limit = 100) =>
-  client.getKlines(symbol, interval, limit);
+export const getRecentCandles = (client, symbol = DEFAULT_SYMBOL, interval = "1h", limit = 100, endTime) =>
+  client.getKlines(symbol, interval, limit, endTime);
 
 export const getTradingFee = (client, symbol = DEFAULT_SYMBOL) => client.getTradeFee(symbol);
