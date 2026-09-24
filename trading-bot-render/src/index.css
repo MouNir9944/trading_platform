@@ -2272,7 +2272,9 @@ button.mini-symbol:hover, button.mini-symbol[aria-expanded="true"] { border-colo
 .notif-bell:hover { border-color: var(--accent); }
 .notif-bell.has-unread { border-color: var(--buy); }
 .notif-bell b { background: var(--sell); border-radius: 999px; color: #fff; font-size: 10px; line-height: 1; padding: 3px 5px; }
-.notif-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5); max-width: calc(100vw - 24px); padding: 10px 12px; position: absolute; right: 0; top: 38px; width: 380px; z-index: 150; }
+/* Fixed to the viewport (not positioned off the bell) so it always opens from the right side of the screen,
+   whatever row of a wrapped header the bell itself lands on; JS sets `top` to hang just below the bell. */
+.notif-panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5); max-width: calc(100vw - 24px); padding: 10px 12px; position: fixed; right: 12px; top: 38px; width: 380px; z-index: 150; }
 .notif-head { align-items: center; display: flex; justify-content: space-between; margin-bottom: 8px; }
 .notif-head div { display: flex; gap: 12px; }
 .notif-prefs { border-bottom: 1px solid var(--border-soft); display: flex; gap: 14px; padding-bottom: 8px; }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { getNotifications, markNotificationsRead } from "../api.js";
 import { audioState, desktopPermission, playChime, primeAudio, requestDesktop, showDesktop } from "../lib/amdAlerts.js";
@@ -39,7 +39,29 @@ export default function NotificationCenter({ timeZone = "UTC", onUsePlan = () =>
   const lastAt = useRef(null);
   const prefsRef = useRef(prefs);
   const rootRef = useRef(null);
+  const bellRef = useRef(null);
+  const panelRef = useRef(null);
   prefsRef.current = prefs;
+
+  // The panel is fixed to the viewport's right edge (not positioned off the bell) so it always opens from the
+  // right side of the screen, whatever row of a wrapped header the bell itself lands on. Only its vertical
+  // position (how far below the bell to hang) still depends on where the bell actually is.
+  useLayoutEffect(() => {
+    if (!open) return undefined;
+    const bell = bellRef.current;
+    const panel = panelRef.current;
+    if (!bell || !panel) return undefined;
+    function place() {
+      panel.style.top = `${bell.getBoundingClientRect().bottom + 8}px`;
+    }
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open]);
 
   const poll = useCallback(async () => {
     try {
@@ -116,12 +138,12 @@ export default function NotificationCenter({ timeZone = "UTC", onUsePlan = () =>
   return (
     <>
       <div className="notif-wrap" ref={rootRef}>
-        <button type="button" className={`notif-bell${unread ? " has-unread" : ""}`} aria-label={`Notifications${unread ? `, ${unread} unread` : ""}`} aria-expanded={open} onClick={() => setOpen((v) => !v)} title="Notifications from the AMD bot">
+        <button type="button" ref={bellRef} className={`notif-bell${unread ? " has-unread" : ""}`} aria-label={`Notifications${unread ? `, ${unread} unread` : ""}`} aria-expanded={open} onClick={() => setOpen((v) => !v)} title="Notifications from the AMD bot">
           <span aria-hidden="true">🔔</span>
           {unread > 0 && <b>{unread > 99 ? "99+" : unread}</b>}
         </button>
         {open && (
-          <div className="notif-panel" role="dialog" aria-label="Notifications">
+          <div className="notif-panel" role="dialog" aria-label="Notifications" ref={panelRef}>
             <div className="notif-head">
               <strong>Notifications</strong>
               <div>

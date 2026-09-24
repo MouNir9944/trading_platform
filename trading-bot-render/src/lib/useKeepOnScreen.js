@@ -19,8 +19,11 @@ export function useKeepOnScreen(ref, open, { gutter = 12, breakpoint = 640 } = {
     function place() {
       el.style.transform = "";
       if (!window.matchMedia(`(max-width: ${breakpoint}px)`).matches) return; // desktop: the plain CSS position already fits
+      // clientWidth, not innerWidth: a panel wide enough to force a horizontal scrollbar inflates innerWidth to
+      // include it, understating how far the panel actually reaches past the true visible edge.
+      const viewportWidth = document.documentElement.clientWidth;
       const rect = el.getBoundingClientRect();
-      const overflowRight = rect.right - (window.innerWidth - gutter);
+      const overflowRight = rect.right - (viewportWidth - gutter);
       const overflowLeft = gutter - rect.left;
       const shift = overflowRight > 0 ? -overflowRight : overflowLeft > 0 ? overflowLeft : 0;
       if (shift !== 0) el.style.transform = `translateX(calc(-50% + ${shift}px))`;
