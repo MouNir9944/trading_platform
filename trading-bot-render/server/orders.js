@@ -353,10 +353,22 @@ export class OrderManager {
     return { deleted: removed.length };
   }
 
+  /** Forget every order of this mode, active or not. Only for resetting the paper account: its simulated
+   * exchange (balances, orders) is wiped at the same time, so any still-active record here would otherwise
+   * be orphaned - its monitor polling an order id the simulated exchange no longer knows about. */
+  clearAccount(accountMode) {
+    const removed = Object.values(this.orders)
+      .filter((order) => order.account_mode === accountMode)
+      .map((order) => order.id);
+    for (const id of removed) delete this.orders[id];
+    this.#queue(() => this.store.removeOrders(removed));
+    return { deleted: removed.length };
+  }
+
   async cleanupAllAccounts() {
-    const cancelled = { testnet: [], live: [] };
+    const cancelled = { paper: [], live: [] };
     const errors = [];
-    for (const mode of ["testnet", "live"]) {
+    for (const mode of ["paper", "live"]) {
       try {
         const client = this.getClient(mode);
         for (const open of await client.getOpenOrders()) {

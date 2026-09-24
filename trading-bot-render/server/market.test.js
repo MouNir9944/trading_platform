@@ -85,7 +85,7 @@ test("without market caps the ranking still works and says the cap is unknown", 
   assert.ok(rows.every((r) => Number.isInteger(r.score)));
 });
 
-test("testnet fallback data (minVolume 0) scores every pair", () => {
+test("fallback data with no volume floor (minVolume 0) still scores every pair", () => {
   const rows = buildOverview({ tickers: [ticker("AAAUSDT", { quoteVolume: "10" })], tradable: tradable("AAA"), minVolume: 0 });
   assert.equal(typeof rows[0].score, "number");
   assert.ok(MIN_SCORED_VOLUME > 0);

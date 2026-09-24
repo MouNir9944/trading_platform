@@ -205,7 +205,7 @@ test("HTTP: /stocks/company needs a listed ticker and reports failures", async (
   const fakeStocks = { async exchangeInfo() { return { symbols: listed }; } };
   const fakeYahoo = { async company(symbol) { if (symbol === "SPY") throw new Error("The company data service is rate limiting requests: try again in a minute"); return parseCompany(companyJson(), symbol); } };
   const store = new FileStore({ dir: fs.mkdtempSync(path.join(os.tmpdir(), "co-")) });
-  const spot = new OrderManager({ getClient: () => ({}), getMode: () => "testnet", getTradingFee: async () => ({}), store });
+  const spot = new OrderManager({ getClient: () => ({}), getMode: () => "paper", getTradingFee: async () => ({}), store });
   await spot.init();
   const { app } = createApp({ orderManager: spot, stocksClient: fakeStocks, stockData: fakeYahoo });
   const server = app.listen(0);

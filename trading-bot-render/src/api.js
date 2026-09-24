@@ -46,6 +46,16 @@ export async function setAccountMode(mode) {
   return res.json();
 }
 
+export function getPaperBalance() {
+  return getJson("/account/paper-balance");
+}
+
+/** Directly set the simulated paper balance: `market` is "spot" (with an optional `asset`, default USDT) or "futures". */
+export const setPaperBalance = (market, amount, asset) => sendJson("/account/paper-balance", "POST", { market, amount, asset });
+
+/** Wipe every simulated paper order/position and start fresh at the given balances (defaults if omitted). */
+export const resetPaperAccount = (spotUsdt, futuresUsdt) => sendJson("/account/paper-reset", "POST", { spotUsdt, futuresUsdt });
+
 export function getTradingFee(symbol = "XLMUSDT") {
   return getJson(`/account/trading-fee?symbol=${symbol}`);
 }
@@ -63,17 +73,17 @@ export function getSymbols(quote = "USDT") {
   return getJson(`/market/symbols?quote=${quote}`);
 }
 
-export function getOrders(mode = "testnet") {
+export function getOrders(mode = "paper") {
   return getJson(`/orders?mode=${mode}`);
 }
 
-export function getBinanceOpenOrders(symbol, mode = "testnet") {
+export function getBinanceOpenOrders(symbol, mode = "paper") {
   const params = new URLSearchParams({ mode });
   if (symbol) params.set("symbol", symbol);
   return getJson(`/orders/binance-open?${params.toString()}`);
 }
 
-export async function cancelBinanceOpenOrder(symbol, orderId, mode = "testnet") {
+export async function cancelBinanceOpenOrder(symbol, orderId, mode = "paper") {
   const res = await fetch(`${BASE}/orders/binance-open/${symbol}/${orderId}?mode=${mode}`, { method: "DELETE" });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -165,8 +175,8 @@ export const updateRisk = (patch, market = "spot") => sendJson(`/risk?market=${m
 export const resetRiskDrawdown = (market = "spot") => sendJson(`/risk/reset-drawdown?market=${market}`, "POST");
 
 // ---- futures trading ----
-export const getFuturesAccount = (mode = "testnet") => getJson(`/futures/account?mode=${mode}`);
-export const getFuturesOrders = (mode = "testnet") => getJson(`/futures/orders?mode=${mode}`);
+export const getFuturesAccount = (mode = "paper") => getJson(`/futures/account?mode=${mode}`);
+export const getFuturesOrders = (mode = "paper") => getJson(`/futures/orders?mode=${mode}`);
 export const createFuturesOrder = (order) => sendJson("/futures/orders", "POST", order);
 export const cancelFuturesOrder = (orderId) => sendJson(`/futures/orders/${orderId}`, "DELETE");
 export const deleteFuturesOrderHistory = (orderId) => sendJson(`/futures/orders/${orderId}/history`, "DELETE");
@@ -187,17 +197,20 @@ export const cancelStockOrder = (orderId) => sendJson(`/stocks/orders/${encodeUR
 export const searchStocks = (q) => getJson(`/stocks/search?q=${encodeURIComponent(q)}`);
 export const getStockHistory = (symbol) => getJson(`/stocks/history?symbol=${encodeURIComponent(symbol)}`);
 export const getStockCompany = (symbol) => getJson(`/stocks/company?symbol=${encodeURIComponent(symbol)}`);
+export const getStockPerformance = () => getJson("/stocks/performance");
 
 // ---- economic news ----
 export const getNews = (days = 7) => getJson(`/news?days=${days}`);
 export const getNewsCalendar = () => getJson("/news/calendar");
 
-// ---- AMD bot, backtest and notifications ----
+// ---- strategies: bots, backtests and notifications ----
 export const getNotifications = (since = 0, limit = 50) => getJson(`/notifications?since=${since}&limit=${limit}`);
 export const markNotificationsRead = (ids = null) => sendJson("/notifications/read", "POST", ids ? { ids } : {});
 export const sendTestNotification = () => sendJson("/notifications/test", "POST");
-export const getAmdStatus = () => getJson("/amd/status");
-export const putAmdConfig = (patch) => sendJson("/amd/config", "PUT", patch);
-export const scanAmdNow = () => sendJson("/amd/scan", "POST");
-export const getAmdLog = (limit = 50) => getJson(`/amd/log?limit=${limit}`);
-export const runAmdBacktest = (body) => sendJson("/amd/backtest", "POST", body);
+export const getStrategies = () => getJson("/strategies");
+export const getBot = (id) => getJson(`/strategies/${id}/bot`);
+export const putBot = (id, patch) => sendJson(`/strategies/${id}/bot`, "PUT", patch);
+export const scanBot = (id) => sendJson(`/strategies/${id}/bot/scan`, "POST");
+export const getBotLog = (id = null, limit = 50) => getJson(id ? `/strategies/${id}/log?limit=${limit}` : `/bots/log?limit=${limit}`);
+export const runStrategyBacktest = (id, body) => sendJson(`/strategies/${id}/backtest`, "POST", body);
+export const compareStrategies = (body) => sendJson("/strategies/compare", "POST", body);

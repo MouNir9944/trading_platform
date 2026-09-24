@@ -357,7 +357,7 @@ select:focus-visible {
   margin: 2px 0 0;
 }
 
-.testnet-badge {
+.mode-badge {
   background: rgba(224, 170, 72, 0.1);
   border: 1px solid var(--hold-dim);
   border-radius: 6px;
@@ -369,7 +369,7 @@ select:focus-visible {
   padding: 3px 7px;
 }
 
-.testnet-badge.live-badge {
+.mode-badge.live-badge {
   background: rgba(238, 106, 88, 0.1);
   border-color: var(--sell-dim);
   color: var(--sell);
@@ -561,6 +561,39 @@ select:focus-visible {
   margin-top: 2px;
 }
 
+/* ---- draggable order draft (drag the entry line, the TP zone or the SL zone straight on the chart) ---- */
+/* Kept narrow (DRAFT_BOX_BARS) and dimmer than a real position box at rest, so it reads as a compact, movable
+   control near the current price rather than a wide panel sitting over the candles; hover brightens each line. */
+
+.long-position-box.is-draggable { border-left-color: var(--accent); opacity: 0.55; }
+.long-position-box.is-draggable:hover,
+.long-position-box.is-draggable:has(.is-draggable:hover) { opacity: 0.94; }
+.long-position-box.is-blocked { border-left-color: var(--sell); }
+.long-position-tp.is-draggable,
+.long-position-sl.is-draggable,
+.long-position-entry.is-draggable {
+  cursor: ns-resize;
+  pointer-events: auto;
+  touch-action: none;
+}
+.long-position-tp.is-draggable:hover,
+.long-position-sl.is-draggable:hover { filter: brightness(1.25); }
+.long-position-entry.is-draggable:hover { background: rgba(76, 141, 255, 0.28); }
+.long-position-box.is-blocked .long-position-entry.is-draggable { border-color: rgba(240, 84, 84, 0.75); }
+.long-position-blocked {
+  background: rgba(240, 84, 84, 0.85);
+  border-radius: 4px;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  left: 4px;
+  padding: 2px 6px;
+  position: absolute;
+  text-transform: uppercase;
+  top: 4px;
+  white-space: nowrap;
+}
+
 .pnl-positive { color: #9de8df; }
 .pnl-negative { color: #ffb4ae; }
 
@@ -630,6 +663,21 @@ select:focus-visible {
   padding: 0 30px;
   text-align: center;
 }
+
+/* ---- Chart key: abbreviations and a live read of what is switched on ---- */
+
+.chart-key { border-top: 1px solid var(--border-soft); margin-top: 10px; padding-top: 8px; }
+.chart-key-head { align-items: center; background: transparent; border: 0; color: var(--text-faint); display: flex; font-size: 11px; gap: 6px; justify-content: space-between; padding: 2px 2px; text-transform: uppercase; letter-spacing: 0.04em; width: 100%; }
+.chart-key-head:hover { color: var(--text-muted); }
+.chart-key-empty { color: var(--text-faint); font-size: 11.5px; line-height: 1.5; margin: 8px 2px 2px; }
+.chart-key-list { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; max-height: 360px; overflow-y: auto; padding-right: 4px; }
+.chart-key-section { background: var(--surface-2); border: 1px solid var(--border-soft); border-radius: var(--radius-sm); padding: 8px 10px; }
+.chart-key-title { align-items: center; display: flex; gap: 6px; }
+.chart-key-title i { border-radius: 50%; flex: none; height: 8px; width: 8px; }
+.chart-key-title b { font-size: 12px; }
+.chart-key-abbrevs { color: var(--text-muted); display: flex; flex-wrap: wrap; font-size: 10.5px; gap: 4px 12px; line-height: 1.5; margin: 5px 0; }
+.chart-key-abbrevs b { color: var(--text-primary); font-family: var(--font-mono); margin-right: 2px; }
+.chart-key-text { color: var(--text-muted); font-size: 11.5px; line-height: 1.5; margin: 4px 0 0; }
 
 /* ---- Trading panel ---- */
 
@@ -754,6 +802,26 @@ select:focus-visible {
 
 .refresh-balance-button:hover { border-color: var(--accent); color: var(--text-primary); }
 .refresh-balance-button:disabled { cursor: wait; opacity: 0.55; }
+
+.paper-balance-edit {
+  align-items: center;
+  display: flex;
+  gap: 6px;
+  grid-column: 1 / -1;
+  margin: 2px 0 0 8px;
+}
+
+.paper-balance-edit input {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  min-width: 0;
+  padding: 5px 8px;
+  width: 110px;
+}
 
 .order-form {
   align-items: end;
@@ -1029,6 +1097,13 @@ select:focus-visible {
   .chart-panel { min-height: 0; }
   .candle-chart-shell { flex: none; height: 62vh; min-height: 420px; }
   .pair-block { justify-content: flex-start; order: 3; width: 100%; }
+
+  /* Whether the view-switch fits next to the brand on one line is a knife-edge decision at these widths (it can
+     come down to a few px, e.g. a scrollbar appearing) — rather than leave that to chance, give it its own row
+     below the brand, deterministically, and keep the ticker/status row under that. */
+  .header .view-switch { flex-basis: 100%; order: 1; }
+  .header .pair-picker { order: 2; }
+  .header .status-row { order: 3; }
 }
 
 @media (max-width: 640px) {
@@ -1040,6 +1115,29 @@ select:focus-visible {
   .pair-price { font-size: 26px; }
   .history-row { grid-template-columns: 1.4fr auto 1fr auto; }
   .history-row > span:nth-child(3) { display: none; }
+
+  /* Toolbar dropdowns (Indicators, Strategies, ...) are attached to a small button that can sit anywhere in a
+     wrapped toolbar row; anchoring them at the button's own left edge can push them off the right of a narrow
+     screen. Centering on the button and capping the width to the viewport keeps them on-screen either way. */
+  .ind-menu,
+  .strat-menu {
+    left: 50%;
+    max-width: calc(100vw - 24px);
+    min-width: 0;
+    transform: translateX(-50%);
+    width: max-content;
+  }
+
+  /* Only here (a real phone) can a full-width row of six tabs still be wider than the screen; scroll it instead of
+     clipping it, with a fade on the trailing edge so it is visible there is more to scroll to. */
+  .view-switch {
+    -webkit-mask-image: linear-gradient(to right, black calc(100% - 22px), transparent);
+    mask-image: linear-gradient(to right, black calc(100% - 22px), transparent);
+    max-width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .view-switch::-webkit-scrollbar { display: none; }
 }
 
 /* ---- Chart overlay toggles ---- */
@@ -1239,6 +1337,7 @@ select:focus-visible {
 
 .session-legend span { align-items: center; display: inline-flex; gap: 5px; }
 .session-legend i { border-radius: 2px; display: inline-block; height: 4px; width: 12px; }
+.peak-swatch { background: #f5c518; }
 
 .session-list { list-style: none; margin: 0; padding: 0; }
 
@@ -1717,21 +1816,6 @@ button.pm-row:hover { background: var(--surface-2); }
 
 /* ---- LuxAlgo-style SMC ---- */
 
-.lux-toggle { display: inline-flex; }
-
-.lux-toggle button {
-  background: transparent;
-  border: 1px solid var(--border);
-  color: var(--text-faint);
-  font-size: 11px;
-  padding: 3px 10px;
-}
-
-.lux-toggle button:first-child { border-radius: 999px 0 0 999px; }
-.lux-toggle button:last-child { border-left: 0; border-radius: 0 999px 999px 0; padding: 3px 9px; }
-.lux-toggle button:hover { color: var(--text-primary); }
-.lux-toggle button.is-on { background: rgba(33, 87, 243, 0.16); border-color: rgba(33, 87, 243, 0.55); color: #7fa4ff; }
-
 .lux-panel {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -1773,34 +1857,28 @@ button.pm-row:hover { background: var(--surface-2); }
 .lx-foot p { color: var(--text-faint); font-size: 10.5px; line-height: 1.5; margin: 8px 0 0; }
 .lx-foot a { color: var(--accent); }
 
-/* ---- AMD indicator ---- */
+/* ---- volume profile status ---- */
 
-.amd-panel { left: 12px; width: min(460px, calc(100% - 24px)); }
-.lx-note { color: var(--text-muted); font-size: 11.5px; line-height: 1.5; margin: 4px 0 0; }
-.amd-panel .lx-grid { grid-template-columns: 1fr; }
-
-.amd-status {
+.vp-status {
   align-items: center;
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 999px;
   color: var(--text-muted);
   display: inline-flex;
+  flex-wrap: wrap;
   font-size: 11px;
-  gap: 8px;
+  gap: 4px 12px;
   padding: 3px 10px;
 }
 
-.amd-status b.up { color: #5fdba5; }
-.amd-status b.down { color: #f58a8a; }
-.amd-status em { color: var(--text-faint); font-style: normal; }
-.amd-stage.is-done { color: #5fdba5; }
-.amd-stage.is-failed { color: #f58a8a; }
-.amd-stage.is-waiting { color: #c7a3f7; }
+.vp-status b { color: #e0aa48; font-weight: 600; }
+.vp-status em { font-style: normal; font-weight: 600; }
+.vp-status em.is-above { color: #5fdba5; }
+.vp-status em.is-below { color: #f58a8a; }
+.vp-status em.is-inside { color: #c7a3f7; }
 
-/* ---- AMD alerts ---- */
-
-.lux-toggle .mid-button { border-left: 0; border-radius: 0; padding: 3px 8px; }
+/* ---- notification toasts ---- */
 
 .amd-toasts {
   display: flex;
@@ -1859,7 +1937,12 @@ button.pm-row:hover { background: var(--surface-2); }
 
 /* ---- Binance Stocks ---- */
 
+/* At any width down to a real phone, the header's own `flex-wrap: wrap` gives the view-switch its own full-width
+   row once it no longer fits alongside the pair ticker/status pills — content-based sizing (the default) is what
+   makes that wrap trigger, so nothing extra is needed here for "medium" desktop widths. Only below 640px can a
+   full-width row of six tabs still be wider than the screen itself; that (and only that) case scrolls instead. */
 .view-switch { margin-right: 4px; }
+.view-switch button { flex: none; }
 .stocks-view { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr) 380px; margin-top: 12px; }
 @media (max-width: 1000px) { .stocks-view { grid-template-columns: 1fr; } }
 .stocks-totals { margin: 8px 0 14px; }
@@ -1900,8 +1983,7 @@ button.pm-row:hover { background: var(--surface-2); }
 .chart-controls { flex-wrap: wrap; justify-content: flex-end; order: 2; }
 .toolbar-break { flex-basis: 100%; height: 0; order: 3; }
 .ind-menu-wrap { order: 4; position: relative; }
-.chart-toolbar .lux-toggle { order: 5; }
-.chart-toolbar .amd-status { order: 6; }
+.chart-toolbar .vp-status { order: 6; }
 .chart-toolbar .session-legend { order: 7; }
 .chart-toolbar .chart-legend { margin-left: auto; order: 8; }
 .tz-label { display: none; }
@@ -1937,6 +2019,7 @@ button.pm-row:hover { background: var(--surface-2); }
 .ind-group h5 { grid-column: 1 / -1; }
 .ind-item { align-items: center; color: var(--text-muted); display: flex; font-size: 12px; gap: 7px; }
 .ind-item input { accent-color: #4c8dff; }
+.ind-item-row { align-items: center; display: flex; gap: 6px; grid-column: 1 / -1; justify-content: space-between; }
 
 /* ---- Multi-chart screen ---- */
 
@@ -1964,11 +2047,11 @@ button.pm-row:hover { background: var(--surface-2); }
 .mini-error { background: rgba(240, 84, 84, 0.12); border-radius: 6px; color: #f58a8a; font-size: 11px; left: 8px; margin: 0; padding: 4px 8px; position: absolute; right: 8px; top: 8px; z-index: 2; }
 @media (max-width: 980px) { .multi-grid { grid-auto-rows: 320px; grid-template-columns: 1fr !important; grid-template-rows: none !important; } }
 
-/* one header row on wide screens */
+/* Prefer one header row on wide screens, but only while everything actually fits: forcing
+   nowrap unconditionally made long pair names (e.g. BROCCOLI714/USDT) overflow and visually
+   collide with the nav tabs and status pills instead of wrapping to a second row. */
 @media (min-width: 1500px) {
-  .header { flex-wrap: nowrap; gap: 10px 18px; }
-  .status-row { flex-wrap: nowrap; flex-shrink: 0; }
-  .pair-picker { flex-wrap: nowrap; min-width: 0; }
+  .header { flex-wrap: wrap; gap: 10px 18px; }
 }
 .segmented button { white-space: nowrap; }
 
@@ -2267,3 +2350,63 @@ button.mini-symbol:hover, button.mini-symbol[aria-expanded="true"] { border-colo
 .chan-state { border-radius: 999px; flex: none; font-size: 11px; padding: 2px 10px; }
 .chan-state.is-on { background: rgba(53, 196, 140, 0.15); color: var(--buy); }
 .chan-state.is-off { background: var(--surface-3); color: var(--text-muted); }
+
+/* ---- Strategies screen ---- */
+
+.strat-layout { display: grid; gap: 16px; grid-template-columns: 270px minmax(0, 1fr); align-items: start; }
+@media (max-width: 1000px) { .strat-layout { grid-template-columns: 1fr; } }
+.strat-list { display: flex; flex-direction: column; gap: 6px; max-height: calc(100vh - 170px); overflow-y: auto; position: sticky; top: 8px; }
+@media (max-width: 1000px) { .strat-list { max-height: none; position: static; flex-direction: row; overflow-x: auto; } .strat-item { min-width: 220px; } }
+.strat-item { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text-primary); cursor: pointer; display: flex; flex-direction: column; gap: 3px; padding: 9px 12px; text-align: left; }
+.strat-item:hover { border-color: var(--accent); }
+.strat-item.is-active { background: var(--surface-3); border-color: var(--accent); }
+.strat-item b { font-size: 13px; }
+.strat-item span { color: var(--text-muted); font-size: 11.5px; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.strat-item em { display: flex; font-style: normal; gap: 5px; min-height: 0; }
+.strat-badge { border-radius: 999px; font-size: 10px; font-style: normal; padding: 1px 8px; }
+.strat-badge.is-order { background: rgba(53, 196, 140, 0.18); color: var(--buy); }
+.strat-badge.is-watch { background: rgba(91, 156, 255, 0.18); color: var(--accent); }
+.strat-badge.is-chart { background: rgba(224, 170, 72, 0.16); color: var(--hold); }
+.strat-detail { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.strat-head { align-items: flex-start; display: flex; flex-wrap: wrap; gap: 10px 20px; justify-content: space-between; }
+.strat-head h3 { font-size: 16px; margin: 0; }
+.strat-head p { color: var(--text-muted); font-size: 12.5px; line-height: 1.5; margin: 4px 0 0; max-width: 760px; }
+.strat-tags { display: flex; gap: 6px; }
+.strat-tags span { background: var(--surface-3); border-radius: 999px; font-size: 10.5px; padding: 1px 9px; }
+.strat-actions { align-items: center; display: flex; gap: 10px; }
+.bt-row.bt-cmp { grid-template-columns: 2.6fr repeat(6, minmax(0, 1fr)) 0.6fr; min-width: 640px; }
+.bt-row.bt-cmp span:first-child { display: flex; flex-direction: column; font-family: var(--font-ui); gap: 2px; }
+.cmp-verdict { border-left: 3px solid; font-size: 10.5px; padding-left: 6px; }
+.cmp-verdict.is-good { border-color: #35c48c; color: #5fdba5; }
+.cmp-verdict.is-mixed { border-color: #7c8aa3; color: var(--text-muted); }
+.cmp-verdict.is-bad { border-color: #e8604c; color: #f58a8a; }
+.strat-menu { min-width: 300px; }
+.strat-menu-item { align-items: center; display: flex; gap: 8px; }
+.strat-menu-item small { color: var(--text-faint); font-size: 10.5px; margin-left: auto; }
+.strat-dot { border: 1px solid var(--border); border-radius: 50%; flex: none; height: 9px; width: 9px; }
+.strat-menu-foot { border-top: 1px solid var(--border-soft); display: flex; flex-direction: column; gap: 6px; margin-top: 8px; padding-top: 8px; }
+.strat-menu-foot p { color: var(--text-faint); font-size: 10.5px; line-height: 1.45; margin: 0; }
+.strat-menu-foot .link-button { text-align: left; }
+
+.strat-menu { max-height: min(70vh, 640px); min-width: 340px; overflow-y: auto; }
+.strat-menu-row { border-bottom: 1px solid var(--border-soft); }
+.strat-menu-row:last-child { border-bottom: 0; }
+.strat-menu-row .strat-menu-item { flex: 1; }
+.strat-menu-line { align-items: center; display: flex; gap: 4px; }
+.strat-gear { background: transparent; border: 1px solid transparent; border-radius: 6px; color: var(--text-muted); cursor: pointer; font-size: 13px; padding: 2px 7px; }
+.strat-gear:hover, .strat-gear.is-on { border-color: var(--accent); color: var(--text-primary); }
+.strat-settings { background: var(--surface-2); border-radius: var(--radius-sm); display: flex; flex-direction: column; gap: 8px; margin: 2px 0 8px 24px; padding: 8px 10px; }
+.strat-settings h6 { color: var(--text-faint); font-size: 10px; letter-spacing: 0.04em; margin: 0; text-transform: uppercase; }
+.strat-fields { display: grid; gap: 6px 8px; grid-template-columns: 1fr 1fr; }
+.strat-fields label { color: var(--text-muted); display: flex; flex-direction: column; font-size: 10.5px; gap: 2px; }
+.strat-fields input, .strat-fields select { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); font-size: 12px; padding: 4px 6px; width: 100%; }
+
+/* ---- Performance tab ---- */
+
+.perf-chart-head { align-items: center; display: flex; justify-content: space-between; margin-bottom: 4px; }
+.pnl-bars { overflow-x: auto; padding-bottom: 2px; }
+.pnl-bars svg { display: block; }
+.pnl-bar-up { fill: var(--buy); }
+.pnl-bar-down { fill: var(--sell); }
+.pnl-bars-zero { stroke: var(--border); stroke-width: 1; }
+.pnl-bars-label { fill: var(--text-faint); font-family: var(--font-mono); font-size: 9px; }

@@ -1,14 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ColorType, LineSeries, createChart } from "lightweight-charts";
 
-import { getAmdLog, getAmdStatus, putAmdConfig, runAmdBacktest, scanAmdNow, sendTestNotification } from "../api.js";
+import {
+  compareStrategies, getBot, getBotLog, getStrategies, putBot, runStrategyBacktest, scanBot, sendTestNotification,
+} from "../api.js";
 import { PERMISSION_HELP } from "./NotificationCenter.jsx";
 import { audioState, desktopPermission, playChime, primeAudio, requestDesktop, showDesktop } from "../lib/amdAlerts.js";
-import { usePersistentState, oneOf } from "../lib/persist.js";
+import { oneOf, usePersistentState } from "../lib/persist.js";
 
 const INTERVALS = ["5m", "15m", "30m", "1h", "2h", "4h"];
 const PRESET_PAIRS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "LINKUSDT", "AVAXUSDT", "TSLAUSDT"];
-const FORM_KEY = "amd-backtest-form";
 
 const r2 = (n, d = 2) => (n == null || !Number.isFinite(n) ? "—" : n.toFixed(d));
 const signedR = (n) => (n == null || !Number.isFinite(n) ? "—" : `${n >= 0 ? "+" : "−"}${Math.abs(n).toFixed(2)}R`);
@@ -17,27 +18,26 @@ const tone = (n) => (n == null ? "" : n >= 0 ? "profit-estimate" : "loss-estimat
 const pf = (stats) => (stats.trades === 0 ? "—" : stats.profitFactor == null || stats.profitFactor === Infinity ? "∞" : stats.profitFactor.toFixed(2));
 const when = (sec, timeZone) => new Intl.DateTimeFormat(undefined, { timeZone, month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }).format(sec * 1000);
 const ago = (ms, now) => (ms ? `${Math.max(0, Math.round((now - ms) / 60_000))} min ago` : "not yet");
+const verdictClass = (v) => `is-${v.tone === "good" ? "good" : v.tone === "bad" ? "bad" : "mixed"}`;
 
-const FORM_DEFAULTS = {
+/** Default backtest form for a strategy: its own settings plus the way it is traded. */
+const formDefaults = (strategy) => ({
   market: "futures", symbols: PRESET_PAIRS, interval: "15m", candles: 3000,
-  entryMode: "limit-close", targetMode: "range", targetR: 2, expiryCandles: 3, minRewardRisk: 1,
-  minRangeBars: 10, maxRangeAtr: 3.5, riskPerTradePct: 1, longs: true, shorts: true, sweep: true,
-};
-
-function loadForm() {
-  try { return { ...FORM_DEFAULTS, ...JSON.parse(window.localStorage.getItem(FORM_KEY) ?? "{}") }; } catch { return { ...FORM_DEFAULTS }; }
-}
+  entryMode: "limit-close", targetMode: "own", targetR: 2, expiryCandles: 3, minRewardRisk: 1,
+  riskPerTradePct: 1, longs: true, shorts: strategy.directions.includes("short"), sweep: true,
+  params: { ...(strategy.defaults ?? {}) },
+});
 
 /** The request body for a backtest, from the form. */
 export function backtestBody(f) {
   return {
     market: f.market, symbols: f.symbols, interval: f.interval, candles: Number(f.candles), sweep: f.sweep, riskPerTradePct: Number(f.riskPerTradePct),
-    engine: { minRangeBars: Number(f.minRangeBars), maxRangeAtr: Number(f.maxRangeAtr), minRewardRisk: Number(f.minRewardRisk) },
+    params: Object.fromEntries(Object.entries(f.params ?? {}).map(([k, v]) => [k, Number(v)])),
     trade: { entryMode: f.entryMode, targetMode: f.targetMode, targetR: Number(f.targetR), expiryCandles: Number(f.expiryCandles), minRewardRisk: Number(f.minRewardRisk), longs: f.longs, shorts: f.shorts },
   };
 }
 
-// ---------------------------------------------------------------- equity chart
+// ---------------------------------------------------------------- shared pieces
 
 function EquityChart({ curve }) {
   const ref = useRef(null);
@@ -62,18 +62,46 @@ function EquityChart({ curve }) {
   return <div ref={ref} className="bt-equity" />;
 }
 
-// ---------------------------------------------------------------- results
-
 function Kpi({ label, value, sub, cls = "" }) {
   return <div className="bt-kpi"><span>{label}</span><b className={cls}>{value}</b>{sub && <small>{sub}</small>}</div>;
 }
+
+/** The chips + add box used to choose the pairs of a test. */
+function PairChips({ symbols, onChange, extra = null, setError }) {
+  const [input, setInput] = useState("");
+  const add = () => {
+    const s = input.trim().toUpperCase();
+    if (!/^[A-Z0-9]{4,20}$/.test(s)) { setError(`"${input}" is not a valid symbol`); return; }
+    setError(null);
+    if (!symbols.includes(s) && symbols.length < 12) onChange([...symbols, s]);
+    setInput("");
+  };
+  return (
+    <div className="bt-pairs">
+      <p className="sa-sub">Pairs ({symbols.length}/12)</p>
+      <div className="bt-chips">
+        {symbols.map((s) => <span className="bt-chip" key={s}>{s}<button type="button" aria-label={`Remove ${s}`} onClick={() => onChange(symbols.filter((x) => x !== s))}>×</button></span>)}
+      </div>
+      <div className="bt-add">
+        <input value={input} onChange={(e) => setInput(e.target.value.toUpperCase())} onKeyDown={(e) => e.key === "Enter" && add()} placeholder="Add a pair, e.g. AVAXUSDT" spellCheck={false} />
+        <button type="button" className="mini-button" onClick={add}>Add</button>
+      </div>
+      <div className="bt-presets">
+        <button type="button" className="link-button" onClick={() => onChange(PRESET_PAIRS)}>Top 10</button>
+        {extra}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- backtest results
 
 function Results({ result, timeZone, onUse, current }) {
   const c = result.combined;
   const rr = result.counts.avgPlannedRewardRisk;
   return (
     <div className="bt-results">
-      <div className={`sa-verdict is-${result.verdict.tone === "good" ? "good" : result.verdict.tone === "bad" ? "bad" : "mixed"}`}>
+      <div className={`sa-verdict ${verdictClass(result.verdict)}`}>
         <div className="sa-verdict-row"><strong>{result.verdict.label}</strong><span className="sa-score-inline">{c.trades} trades · {result.perSymbol.filter((p) => !p.error).length} pairs · {result.interval}</span></div>
         <p>{result.verdict.text}</p>
       </div>
@@ -126,7 +154,7 @@ function Results({ result, timeZone, onUse, current }) {
           <div className="bt-table" role="table">
             <div className="bt-row bt-sweep bt-head" role="row"><span>Entry and target</span><span>Trades</span><span>Win</span><span>Expectancy</span><span>PF</span></div>
             {result.sweep.map((row) => {
-              const isCurrent = row.trade.entryMode === current.entryMode && row.trade.targetMode === current.targetMode && (row.trade.targetMode === "range" || row.trade.targetR === Number(current.targetR));
+              const isCurrent = row.trade.entryMode === current.entryMode && row.trade.targetMode === current.targetMode && (row.trade.targetMode === "own" || row.trade.targetR === Number(current.targetR));
               return (
                 <div className={`bt-row bt-sweep${isCurrent ? " is-current" : ""}`} role="row" key={row.label}>
                   <span>{row.label}{isCurrent ? " ← yours" : ""}</span>
@@ -155,7 +183,7 @@ function Results({ result, timeZone, onUse, current }) {
       </div>
 
       <div className="bt-actions">
-        <button type="button" className="mini-button accent" onClick={onUse}>Use these settings for the bot</button>
+        <button type="button" className="mini-button accent" onClick={onUse}>Use these settings for automatic trading</button>
       </div>
       <p className="order-rule-note">
         How the replay works: a limit order is placed after each signal candle closes and lapses after {result.options.trade.expiryCandles} candles if not filled; it fills at its price (or at the open when price gaps through);
@@ -168,31 +196,22 @@ function Results({ result, timeZone, onUse, current }) {
 
 // ---------------------------------------------------------------- backtest tab
 
-function BacktestTab({ timeZone, botConfig, onUseSettings }) {
-  const [form, setForm] = useState(loadForm);
-  const [input, setInput] = useState("");
+function BacktestTab({ strategy, timeZone, botConfig, onUseSettings }) {
+  const [form, setForm] = usePersistentState(`pref:bt-form:${strategy.id}`, () => formDefaults(strategy), (v) => v && typeof v === "object");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
   const set = (patch) => setForm((f) => ({ ...f, ...patch }));
-
-  useEffect(() => {
-    try { window.localStorage.setItem(FORM_KEY, JSON.stringify(form)); } catch { /* storage unavailable */ }
-  }, [form]);
-
-  const addSymbol = () => {
-    const s = input.trim().toUpperCase();
-    if (!/^[A-Z0-9]{4,20}$/.test(s)) { setError(`"${input}" is not a valid symbol`); return; }
-    setError(null);
-    if (!form.symbols.includes(s) && form.symbols.length < 12) set({ symbols: [...form.symbols, s] });
-    setInput("");
-  };
+  const params = { ...strategy.defaults, ...(form.params ?? {}) };
+  const setParam = (key, value) => set({ params: { ...params, [key]: value } });
+  const canShort = strategy.directions.includes("short");
+  const entryMode = strategy.supportsRetest ? form.entryMode : "limit-close";
 
   async function run() {
     setBusy(true);
     setError(null);
     try {
-      setResult(await runAmdBacktest(backtestBody(form)));
+      setResult(await runStrategyBacktest(strategy.id, backtestBody({ ...form, params, entryMode })));
     } catch (err) {
       setError(err.message);
     } finally {
@@ -207,64 +226,108 @@ function BacktestTab({ timeZone, botConfig, onUseSettings }) {
   return (
     <div className="bt-layout">
       <section className="panel bt-form">
-        <div className="panel-heading"><div><p className="panel-title">Backtest the AMD signal</p><p className="panel-subtitle">Replays exactly the orders the bot would place, on real history</p></div></div>
+        <div className="panel-heading"><div><p className="panel-title">Backtest</p><p className="panel-subtitle">Replays exactly the orders the bot would place, on real history</p></div></div>
         <div className="fut-side-toggle" role="group" aria-label="Market">
           <button type="button" className={form.market === "futures" ? "is-on" : ""} onClick={() => set({ market: "futures" })}>Futures</button>
           <button type="button" className={form.market === "spot" ? "is-on" : ""} onClick={() => set({ market: "spot", shorts: false })}>Spot (long only)</button>
         </div>
 
-        <div className="bt-pairs">
-          <p className="sa-sub">Pairs ({form.symbols.length}/12)</p>
-          <div className="bt-chips">
-            {form.symbols.map((s) => <span className="bt-chip" key={s}>{s}<button type="button" aria-label={`Remove ${s}`} onClick={() => set({ symbols: form.symbols.filter((x) => x !== s) })}>×</button></span>)}
-          </div>
-          <div className="bt-add">
-            <input value={input} onChange={(e) => setInput(e.target.value.toUpperCase())} onKeyDown={(e) => e.key === "Enter" && addSymbol()} placeholder="Add a pair, e.g. AVAXUSDT" spellCheck={false} />
-            <button type="button" className="mini-button" onClick={addSymbol}>Add</button>
-          </div>
-          <div className="bt-presets">
-            <button type="button" className="link-button" onClick={() => set({ symbols: PRESET_PAIRS })}>Top 10</button>
-            {botConfig?.pairs?.length > 0 && <button type="button" className="link-button" onClick={() => set({ symbols: botConfig.pairs.map((p) => p.symbol), interval: botConfig.pairs[0].interval, market: botConfig.market })}>The bot's pairs</button>}
-          </div>
-        </div>
+        <PairChips
+          symbols={form.symbols}
+          onChange={(symbols) => set({ symbols })}
+          setError={setError}
+          extra={botConfig?.pairs?.length > 0 && <button type="button" className="link-button" onClick={() => set({ symbols: botConfig.pairs.map((p) => p.symbol), interval: botConfig.pairs[0].interval, market: botConfig.market })}>The bot's pairs</button>}
+        />
 
         <div className="bt-grid">
           <label>Timeframe<select value={form.interval} onChange={(e) => set({ interval: e.target.value })}>{INTERVALS.map((v) => <option key={v}>{v}</option>)}</select></label>
           <label>History<select value={form.candles} onChange={(e) => set({ candles: e.target.value })}><option value={1000}>1,000 candles</option><option value={3000}>3,000 candles</option><option value={5000}>5,000 candles</option></select></label>
-          <label>Entry<select value={form.entryMode} onChange={(e) => set({ entryMode: e.target.value })}><option value="limit-close">At the signal close</option><option value="fvg-retest">On a retest of the gap</option></select></label>
-          <label>Target<select value={form.targetMode} onChange={(e) => set({ targetMode: e.target.value })}><option value="range">Far side of the range</option><option value="r">Fixed multiple of the risk</option></select></label>
+          <label>Entry<select value={entryMode} onChange={(e) => set({ entryMode: e.target.value })}><option value="limit-close">At the signal close</option>{strategy.supportsRetest && <option value="retest">On a retest</option>}</select></label>
+          <label>Target<select value={form.targetMode} onChange={(e) => set({ targetMode: e.target.value })}><option value="own">The strategy's own target</option><option value="r">Fixed multiple of the risk</option></select></label>
           {form.targetMode === "r" && <Num label="Target (× risk)" field="targetR" min={1} max={5} step={0.5} />}
           <Num label="Order lapses after (candles)" field="expiryCandles" min={1} max={10} />
           <Num label="Min reward:risk" field="minRewardRisk" min={0} max={5} step={0.5} hint="Signals whose reward:risk is below this are skipped" />
           <Num label="Risk per trade (%)" field="riskPerTradePct" min={0.1} max={10} step={0.1} hint="Only for the equity curve" />
-          <Num label="Min range candles" field="minRangeBars" min={4} max={40} />
-          <Num label="Max range height (ATR)" field="maxRangeAtr" min={1.5} max={6} step={0.5} />
         </div>
+
+        {strategy.params.length > 0 && (
+          <>
+            <p className="sa-sub">{strategy.name}: its own settings</p>
+            <div className="bt-grid">
+              {strategy.params.map((p) => (
+                <label key={p.key} title={p.hint}>{p.label}<input type="number" min={p.min} max={p.max} step={p.step ?? 1} value={params[p.key]} onChange={(e) => setParam(p.key, e.target.value)} /></label>
+              ))}
+            </div>
+          </>
+        )}
+
         <div className="bt-checks">
           <label className="switch"><input type="checkbox" checked={form.longs} onChange={(e) => set({ longs: e.target.checked })} /> Long trades</label>
-          <label className="switch"><input type="checkbox" checked={form.shorts && form.market === "futures"} disabled={form.market === "spot"} onChange={(e) => set({ shorts: e.target.checked })} /> Short trades</label>
+          {canShort && <label className="switch"><input type="checkbox" checked={form.shorts && form.market === "futures"} disabled={form.market === "spot"} onChange={(e) => set({ shorts: e.target.checked })} /> Short trades</label>}
           <label className="switch"><input type="checkbox" checked={form.sweep} onChange={(e) => set({ sweep: e.target.checked })} /> Compare other entries and targets</label>
         </div>
         <button type="button" className="primary-button" disabled={busy || form.symbols.length === 0} onClick={run}>{busy ? "Reading history…" : "Run backtest"}</button>
         {busy && <p className="an-hint">Loading up to {Number(form.candles).toLocaleString()} candles for each pair from Binance: this takes 10 to 20 seconds.</p>}
         {error && <p className="order-error">{error}</p>}
-        <button type="button" className="link-button" onClick={() => setForm({ ...FORM_DEFAULTS })}>Reset to defaults</button>
+        <button type="button" className="link-button" onClick={() => setForm(formDefaults(strategy))}>Reset to defaults</button>
       </section>
 
       <section className="panel bt-output">
-        {!result && !busy && <p className="log-empty">Choose pairs and press Run backtest. You get the win rate, the average result per trade after fees, the worst drawdown and an equity curve, so you can see whether the signal has ever paid before you trade it.</p>}
-        {result && <Results result={result} timeZone={timeZone} current={form} onUse={() => onUseSettings({ market: result.market, entryMode: form.entryMode, targetMode: form.targetMode, targetR: Number(form.targetR), expiryCandles: Number(form.expiryCandles), longs: form.longs, shorts: form.shorts, engine: { minRangeBars: Number(form.minRangeBars), maxRangeAtr: Number(form.maxRangeAtr), minRewardRisk: Number(form.minRewardRisk) }, pairs: form.symbols.map((symbol) => ({ symbol, interval: form.interval })) })} />}
+        {!result && !busy && <p className="log-empty">Choose pairs and press Run backtest. You get the win rate, the average result per trade after fees, the worst drawdown and an equity curve, so you can see whether the strategy has ever paid before you trade it.</p>}
+        {result && (
+          <Results
+            result={result} timeZone={timeZone} current={{ ...form, entryMode }}
+            onUse={() => onUseSettings({
+              market: result.market, entryMode, targetMode: form.targetMode, targetR: Number(form.targetR), expiryCandles: Number(form.expiryCandles),
+              longs: form.longs, shorts: canShort && form.shorts, minRewardRisk: Number(form.minRewardRisk),
+              params: Object.fromEntries(Object.entries(params).map(([k, v]) => [k, Number(v)])),
+              pairs: form.symbols.map((symbol) => ({ symbol, interval: form.interval })),
+            })}
+          />
+        )}
       </section>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------- bot log
+
+function BotLog({ timeZone, strategyId = null }) {
+  const [events, setEvents] = useState([]);
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => getBotLog(strategyId, 40).then((d) => { if (!cancelled) setEvents(d.events); }).catch(() => {});
+    load();
+    const id = window.setInterval(load, 10_000);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [strategyId]);
+  return (
+    <section className="panel">
+      <div className="panel-heading"><div><p className="panel-title">{strategyId ? "Log of this strategy" : "Log of all strategies"}</p><p className="panel-subtitle">Every signal, order and refusal, with the reason</p></div></div>
+      {events.length === 0 && <p className="log-empty">Nothing yet.</p>}
+      {events.map((e) => (
+        <div className={`notif-item is-${e.level}`} key={e.id}>
+          <i aria-hidden="true">{e.level === "success" ? "●" : e.level === "error" ? "✕" : e.level === "warn" ? "▲" : "•"}</i>
+          <div>
+            <p className="notif-title">{e.title}</p>
+            {e.body && <p className="notif-body">{e.body}</p>}
+            <p className="notif-time">{new Intl.DateTimeFormat(undefined, { timeZone, month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }).format(e.at)}</p>
+          </div>
+        </div>
+      ))}
+    </section>
   );
 }
 
 // ---------------------------------------------------------------- auto trading tab
 
 /** The settings that change how the bot trades: a backtest check is only valid for the exact ones it was run with. */
-const signature = (c) => JSON.stringify([c.market, c.pairs, c.entryMode, c.targetMode, c.targetR, c.expiryCandles, c.longs, c.shorts, c.engine]);
+const signature = (c) => JSON.stringify([c.market, c.pairs, c.entryMode, c.targetMode, c.targetR, c.expiryCandles, c.longs, c.shorts, c.minRewardRisk, c.params]);
 
-function AutoTab({ risk, timeZone, data, reload, draft, setDraft }) {
+function AutoTab({ strategy, risk, timeZone, handoff, onHandoffUsed }) {
+  const [data, setData] = useState(null);
+  const [draft, setDraft] = useState(null);
+  const [loadError, setLoadError] = useState(null);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
   const [check, setCheck] = useState(null);
@@ -273,23 +336,50 @@ function AutoTab({ risk, timeZone, data, reload, draft, setDraft }) {
   const [scanning, setScanning] = useState(false);
   const [liveWord, setLiveWord] = useState("");
   const [now, setNow] = useState(Date.now());
+  const draftRef = useRef(null);
   useEffect(() => { const id = window.setInterval(() => setNow(Date.now()), 30_000); return () => window.clearInterval(id); }, []);
+
+  const reload = async () => {
+    const next = await getBot(strategy.id);
+    setData(next);
+    setLoadError(null);
+    setDraft((d) => (d == null || JSON.stringify(d) === JSON.stringify(draftRef.current?.config) ? next.config : d));
+    draftRef.current = next;
+  };
+  useEffect(() => {
+    reload().catch((err) => setLoadError(err.message));
+    const id = window.setInterval(() => reload().catch(() => {}), 10_000);
+    return () => window.clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [strategy.id]);
+
+  // "Use these settings" from the backtest
+  useEffect(() => {
+    if (handoff && draft) {
+      setDraft((d) => ({ ...d, ...handoff, params: { ...d.params, ...handoff.params } }));
+      onHandoffUsed();
+    }
+  }, [handoff, draft, onHandoffUsed]);
+
+  if (loadError && !data) return <div className="futures-notice is-error"><strong>Could not reach the server</strong><p>{loadError}</p></div>;
+  if (!data || !draft) return <p className="log-empty">Loading…</p>;
 
   const { config, status } = data;
   const dirty = JSON.stringify(draft) !== JSON.stringify(config);
   const set = (patch) => setDraft((d) => ({ ...d, ...patch, ...(patch.market === "spot" ? { shorts: false } : {}) }));
-  const setEngine = (patch) => setDraft((d) => ({ ...d, engine: { ...d.engine, ...patch } }));
+  const setParam = (key, value) => setDraft((d) => ({ ...d, params: { ...d.params, [key]: value } }));
   const sig = signature(draft);
   const checkValid = check && check.sig === sig;
-  const bad = checkValid && check.groups.some((g) => g.stats.trades === 0 ? false : g.stats.expectancyR <= 0);
+  const bad = checkValid && check.groups.some((g) => g.stats.trades > 0 && g.stats.expectancyR <= 0);
   const live = status.mode === "live";
   const settings = risk?.settings;
+  const canShort = strategy.directions.includes("short");
 
   async function save(extra = {}) {
     setBusy(true);
     setError(null);
     try {
-      await putAmdConfig({ ...draft, armedMode: undefined, ...extra });
+      await putBot(strategy.id, { ...draft, armedMode: undefined, ...extra });
       await reload();
     } catch (err) {
       setError(err.message);
@@ -306,10 +396,9 @@ function AutoTab({ risk, timeZone, data, reload, draft, setDraft }) {
       for (const p of draft.pairs) byInterval.set(p.interval, [...(byInterval.get(p.interval) ?? []), p.symbol]);
       const groups = [];
       for (const [interval, symbols] of byInterval) {
-        const res = await runAmdBacktest({
-          market: draft.market, symbols, interval, candles: 3000, sweep: false, riskPerTradePct: 1,
-          engine: draft.engine,
-          trade: { entryMode: draft.entryMode, targetMode: draft.targetMode, targetR: draft.targetR, expiryCandles: draft.expiryCandles, minRewardRisk: draft.engine.minRewardRisk, longs: draft.longs, shorts: draft.shorts },
+        const res = await runStrategyBacktest(strategy.id, {
+          market: draft.market, symbols, interval, candles: 3000, sweep: false, riskPerTradePct: 1, params: draft.params,
+          trade: { entryMode: draft.entryMode, targetMode: draft.targetMode, targetR: draft.targetR, expiryCandles: draft.expiryCandles, minRewardRisk: draft.minRewardRisk, longs: draft.longs, shorts: draft.shorts },
         });
         groups.push({ interval, symbols, stats: res.combined, verdict: res.verdict, avgRR: res.counts.avgPlannedRewardRisk, days: (res.perSymbol.find((p) => p.to)?.to - res.perSymbol.find((p) => p.from)?.from) / 86400 });
       }
@@ -332,13 +421,13 @@ function AutoTab({ risk, timeZone, data, reload, draft, setDraft }) {
     <div className="auto-layout">
       <section className="panel">
         <div className="panel-heading">
-          <div><p className="panel-title">Automatic AMD orders</p><p className="panel-subtitle">The server watches your pairs, even with every tab closed</p></div>
-          <span className={`testnet-badge ${live ? "live-badge" : ""}`}>{live ? "LIVE ACCOUNT" : "TESTNET"}</span>
+          <div><p className="panel-title">Automatic orders: {strategy.name}</p><p className="panel-subtitle">The server watches your pairs, even with every tab closed</p></div>
+          <span className={`mode-badge ${live ? "live-badge" : ""}`}>{live ? "LIVE ACCOUNT" : "PAPER"}</span>
         </div>
 
         <div className={`auto-state ${status.ordering ? "is-on" : ""}`}>
           <div>
-            <strong>{status.ordering ? `Placing orders automatically (${status.armedMode === "live" ? "LIVE" : "Testnet"})` : status.watching ? "Watching and notifying only: no orders" : "Off"}</strong>
+            <strong>{status.ordering ? `Placing orders automatically (${status.armedMode === "live" ? "LIVE" : "Paper"})` : status.watching ? "Watching and notifying only: no orders" : "Off"}</strong>
             <p>{status.blocked ?? (status.ordering ? `${status.today.count} of ${status.today.max} orders today · ${status.pending.length} open · last check ${ago(status.lastTickAt, now)}` : status.watching ? `Last check ${ago(status.lastTickAt, now)}. You are told about signals; nothing is bought.` : "Nothing is being watched.")}</p>
           </div>
           {status.ordering && <button type="button" className="mini-button danger" disabled={busy} onClick={() => save({ orders: false })}>Stop automatic orders</button>}
@@ -361,17 +450,20 @@ function AutoTab({ risk, timeZone, data, reload, draft, setDraft }) {
           <div className="auto-card">
             <p className="sa-sub">How it trades</p>
             <div className="bt-grid">
-              <label>Market<select value={draft.market} onChange={(e) => set({ market: e.target.value })}><option value="futures">Futures (long and short)</option><option value="spot">Spot (long only)</option></select></label>
-              <label>Entry<select value={draft.entryMode} onChange={(e) => set({ entryMode: e.target.value })}><option value="limit-close">At the signal close</option><option value="fvg-retest">On a retest of the gap</option></select></label>
-              <label>Target<select value={draft.targetMode} onChange={(e) => set({ targetMode: e.target.value })}><option value="range">Far side of the range</option><option value="r">Multiple of the risk</option></select></label>
+              <label>Market<select value={draft.market} onChange={(e) => set({ market: e.target.value })}><option value="futures">Futures{canShort ? " (long and short)" : ""}</option><option value="spot">Spot (long only)</option></select></label>
+              <label>Entry<select value={draft.entryMode} onChange={(e) => set({ entryMode: e.target.value })}><option value="limit-close">At the signal close</option>{strategy.supportsRetest && <option value="retest">On a retest</option>}</select></label>
+              <label>Target<select value={draft.targetMode} onChange={(e) => set({ targetMode: e.target.value })}><option value="own">The strategy's own</option><option value="r">Multiple of the risk</option></select></label>
               {draft.targetMode === "r" && <label>Target (× risk)<input type="number" min="1" max="5" step="0.5" value={draft.targetR} onChange={(e) => set({ targetR: Number(e.target.value) })} /></label>}
               <label>Entry lapses after (candles)<input type="number" min="1" max="10" value={draft.expiryCandles} onChange={(e) => set({ expiryCandles: Number(e.target.value) })} /></label>
               {draft.market === "futures" && <label title="Capped by the max leverage in your Risk tab and by the liquidation check">Leverage<input type="number" min="1" max="20" value={draft.leverage} onChange={(e) => set({ leverage: Number(e.target.value) })} /></label>}
-              <label>Min reward:risk<input type="number" min="0" max="5" step="0.5" value={draft.engine.minRewardRisk} onChange={(e) => setEngine({ minRewardRisk: Number(e.target.value) })} /></label>
+              <label>Min reward:risk<input type="number" min="0" max="5" step="0.5" value={draft.minRewardRisk} onChange={(e) => set({ minRewardRisk: Number(e.target.value) })} /></label>
+              {strategy.params.map((p) => (
+                <label key={p.key} title={p.hint}>{p.label}<input type="number" min={p.min} max={p.max} step={p.step ?? 1} value={draft.params[p.key]} onChange={(e) => setParam(p.key, Number(e.target.value))} /></label>
+              ))}
             </div>
             <div className="bt-checks">
               <label className="switch"><input type="checkbox" checked={draft.longs} onChange={(e) => set({ longs: e.target.checked })} /> Long</label>
-              <label className="switch"><input type="checkbox" checked={draft.shorts && draft.market === "futures"} disabled={draft.market === "spot"} onChange={(e) => set({ shorts: e.target.checked })} /> Short</label>
+              {canShort && <label className="switch"><input type="checkbox" checked={draft.shorts && draft.market === "futures"} disabled={draft.market === "spot"} onChange={(e) => set({ shorts: e.target.checked })} /> Short</label>}
             </div>
           </div>
 
@@ -383,7 +475,7 @@ function AutoTab({ risk, timeZone, data, reload, draft, setDraft }) {
             </div>
             {settings && (
               <p className="an-hint">
-                Size and safety come from your <b>Risk tab</b>, which the server applies to every order: {settings.riskPerTradePct}% of capital lost if a stop fills, at most {settings.maxPositionPct}% in one position, minimum reward:risk {settings.minRewardRisk}, {settings.maxLeverage}× leverage, daily loss {settings.maxDailyLossPct}%, and the pause switch.
+                Size and safety come from your <b>Risk tab</b>, which the server applies to every order of every strategy: {settings.riskPerTradePct}% of capital lost if a stop fills, at most {settings.maxPositionPct}% in one position, minimum reward:risk {settings.minRewardRisk}, {settings.maxLeverage}× leverage, daily loss {settings.maxDailyLossPct}%, and the pause switch.
               </p>
             )}
             <label className="switch"><input type="checkbox" checked={draft.pushSkips} onChange={(e) => set({ pushSkips: e.target.checked })} /> Also send "order not placed" messages to Telegram / webhook</label>
@@ -393,31 +485,31 @@ function AutoTab({ risk, timeZone, data, reload, draft, setDraft }) {
         <div className="auto-actions">
           <label className="switch"><input type="checkbox" checked={draft.watch || draft.orders} disabled={draft.orders} onChange={(e) => set({ watch: e.target.checked })} /> Watch these pairs and notify me (no orders)</label>
           <button type="button" className="mini-button accent" disabled={busy || !dirty} onClick={() => save()}>{busy ? "Saving…" : dirty ? "Save settings" : "Saved"}</button>
-          <button type="button" className="mini-button" disabled={!config.pairs.length || scanning} onClick={async () => { setScanning(true); try { await scanAmdNow(); await reload(); } catch (err) { setError(err.message); } finally { setScanning(false); } }}>{scanning ? "Scanning…" : "Scan now"}</button>
+          <button type="button" className="mini-button" disabled={!config.pairs.length || scanning} onClick={async () => { setScanning(true); try { await scanBot(strategy.id); await reload(); } catch (err) { setError(err.message); } finally { setScanning(false); } }}>{scanning ? "Scanning…" : "Scan now"}</button>
         </div>
         {error && <p className="order-error">{error}</p>}
 
         {!status.ordering && (
           <div className="arm-box">
             <p className="panel-title">Arm automatic orders</p>
-            <p className="an-hint">Real orders are placed on the {live ? "LIVE account with real money" : "Testnet account"}. First, see how these exact settings did on recent history.</p>
+            <p className="an-hint">Real orders are placed on the {live ? "LIVE account with real money" : "Paper account"}. First, see how these exact settings did on recent history.</p>
             <button type="button" className="mini-button" disabled={checking || dirty || draft.pairs.length === 0} onClick={runCheck}>{checking ? "Checking history…" : checkValid ? "Check again" : "Check these settings against history"}</button>
             {dirty && <p className="an-hint">Save your settings first: the check must be for the settings that will trade.</p>}
             {checkValid && (
               <div className="arm-check">
                 {check.groups.map((g) => (
-                  <div className={`sa-verdict is-${g.verdict.tone === "good" ? "good" : g.verdict.tone === "bad" ? "bad" : "mixed"}`} key={g.interval}>
+                  <div className={`sa-verdict ${verdictClass(g.verdict)}`} key={g.interval}>
                     <div className="sa-verdict-row"><strong>{g.interval}: {g.verdict.label}</strong><span className="sa-score-inline">{g.stats.trades} trades · ~{Math.round(g.days)} days</span></div>
                     <p>{g.verdict.text}</p>
                   </div>
                 ))}
-                {minRR != null && avgRR != null && avgRR < minRR && (
-                  <p className="order-error">Your Risk tab requires reward:risk of at least {minRR}, but these signals average {r2(avgRR)} : 1. Most orders will be refused by your own rules ("order not placed"). Lower the minimum in the Risk tab, or try the "retest of the gap" entry.</p>
+                {minRR != null && avgRR != null && Number.isFinite(avgRR) && avgRR < minRR && (
+                  <p className="order-error">Your Risk tab requires reward:risk of at least {minRR}, but these signals average {r2(avgRR)} : 1. Most orders will be refused by your own rules ("order not placed"). Lower the minimum in the Risk tab, or change the entry or target.</p>
                 )}
                 {bad && <label className="switch ack"><input type="checkbox" checked={ack} onChange={(e) => setAck(e.target.checked)} /> I understand these settings lost money in the backtest, and I want to trade them anyway</label>}
                 {live && <label className="live-word">Type <b>LIVE</b> to confirm real money<input value={liveWord} onChange={(e) => setLiveWord(e.target.value)} placeholder="LIVE" /></label>}
-                <button type="button" className="primary-button is-short" disabled={!armable || busy} onClick={() => save({ orders: true, confirm: live ? liveWord : undefined })}>Arm automatic orders on {live ? "the LIVE account" : "Testnet"}</button>
-                <p className="order-rule-note">Every order still passes your risk rules and gets its stop-loss and take-profit on Binance. Switching the account between Testnet and Live switches the bot off. A backtest is history, not a promise.</p>
+                <button type="button" className="primary-button is-short" disabled={!armable || busy} onClick={() => save({ orders: true, confirm: live ? liveWord : undefined })}>Arm automatic orders on {live ? "the LIVE account" : "Paper"}</button>
+                <p className="order-rule-note">Every order still passes your risk rules and gets its stop-loss and take-profit on Binance. Switching the account between Paper and Live switches the bot off. A backtest is history, not a promise.</p>
               </div>
             )}
           </div>
@@ -437,47 +529,125 @@ function AutoTab({ risk, timeZone, data, reload, draft, setDraft }) {
           {status.pending.length > 0 && <p className="sa-sub">Orders it placed and is following</p>}
           {status.pending.map((p) => <div className="auto-scan" key={p.id}><b>{p.symbol}</b><span>{p.dir === "bull" ? "buy" : "sell"}</span><em>{p.status.replace("_", " ").toLowerCase()}</em></div>)}
         </section>
-        <BotLog timeZone={timeZone} />
+        <BotLog timeZone={timeZone} strategyId={strategy.id} />
       </aside>
     </div>
   );
 }
 
-function BotLog({ timeZone }) {
-  const [events, setEvents] = useState([]);
-  useEffect(() => {
-    let cancelled = false;
-    const load = () => getAmdLog(40).then((d) => { if (!cancelled) setEvents(d.events); }).catch(() => {});
-    load();
-    const id = window.setInterval(load, 10_000);
-    return () => { cancelled = true; window.clearInterval(id); };
-  }, []);
+// ---------------------------------------------------------------- one strategy
+
+function StrategyDetail({ strategy, risk, timeZone, onShowOnChart, onChartList }) {
+  const [tab, setTab] = usePersistentState("pref:strategy-tab", "backtest", oneOf(["backtest", "auto"]));
+  const [handoff, setHandoff] = useState(null);
+  const [botConfig, setBotConfig] = useState(null);
+  useEffect(() => { getBot(strategy.id).then((d) => setBotConfig(d.config)).catch(() => setBotConfig(null)); }, [strategy.id, tab]);
+  const onChart = onChartList.includes(strategy.id);
   return (
-    <section className="panel">
-      <div className="panel-heading"><div><p className="panel-title">Bot log</p><p className="panel-subtitle">Every signal, order and refusal, with the reason</p></div></div>
-      {events.length === 0 && <p className="log-empty">Nothing yet.</p>}
-      {events.map((e) => (
-        <div className={`notif-item is-${e.level}`} key={e.id}>
-          <i aria-hidden="true">{e.level === "success" ? "●" : e.level === "error" ? "✕" : e.level === "warn" ? "▲" : "•"}</i>
-          <div>
-            <p className="notif-title">{e.title}</p>
-            {e.body && <p className="notif-body">{e.body}</p>}
-            <p className="notif-time">{new Intl.DateTimeFormat(undefined, { timeZone, month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }).format(e.at)}</p>
+    <div className="strat-detail">
+      <div className="strat-head">
+        <div>
+          <h3>{strategy.name}</h3>
+          <p>{strategy.description}</p>
+          <p className="strat-tags">
+            <span>{strategy.directions.length > 1 ? "long and short" : "long only"}</span>
+            {strategy.params.length > 0 && <span>{strategy.params.length} setting{strategy.params.length === 1 ? "" : "s"}</span>}
+            {strategy.supportsRetest && <span>retest entry</span>}
+          </p>
+        </div>
+        <div className="strat-actions">
+          <button type="button" className={`mini-button ${onChart ? "" : "accent"}`} onClick={() => onShowOnChart(strategy.id)}>{onChart ? "On the chart: open it" : "Show on the chart"}</button>
+          <div className="segmented" role="tablist" aria-label="Strategy sections">
+            <button type="button" role="tab" aria-selected={tab === "backtest"} className={tab === "backtest" ? "is-active" : ""} onClick={() => setTab("backtest")}>Backtest</button>
+            <button type="button" role="tab" aria-selected={tab === "auto"} className={tab === "auto" ? "is-active" : ""} onClick={() => setTab("auto")}>Auto trading</button>
           </div>
         </div>
-      ))}
-    </section>
+      </div>
+      {tab === "backtest" && <BacktestTab key={strategy.id} strategy={strategy} timeZone={timeZone} botConfig={botConfig} onUseSettings={(patch) => { setHandoff(patch); setTab("auto"); }} />}
+      {tab === "auto" && <AutoTab key={strategy.id} strategy={strategy} risk={risk} timeZone={timeZone} handoff={handoff} onHandoffUsed={() => setHandoff(null)} />}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------- compare
+
+function CompareTab({ strategies, onOpen }) {
+  const [form, setForm] = usePersistentState("pref:compare-form", { market: "futures", symbols: PRESET_PAIRS, interval: "15m", candles: 3000, minRewardRisk: 1 }, (v) => v && typeof v === "object");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState(null);
+  const [result, setResult] = useState(null);
+  const set = (patch) => setForm((f) => ({ ...f, ...patch }));
+
+  async function run() {
+    setBusy(true);
+    setError(null);
+    try {
+      setResult(await compareStrategies({ market: form.market, symbols: form.symbols, interval: form.interval, candles: Number(form.candles), trade: { minRewardRisk: Number(form.minRewardRisk), longs: true, shorts: form.market === "futures" } }));
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const rows = result ? [...result.rows].sort((a, b) => (b.stats.trades ? b.stats.expectancyR : -99) - (a.stats.trades ? a.stats.expectancyR : -99)) : [];
+  return (
+    <div className="bt-layout">
+      <section className="panel bt-form">
+        <div className="panel-heading"><div><p className="panel-title">Compare every strategy</p><p className="panel-subtitle">Same pairs, same history, same fees, each with its default settings</p></div></div>
+        <div className="fut-side-toggle" role="group" aria-label="Market">
+          <button type="button" className={form.market === "futures" ? "is-on" : ""} onClick={() => set({ market: "futures" })}>Futures</button>
+          <button type="button" className={form.market === "spot" ? "is-on" : ""} onClick={() => set({ market: "spot" })}>Spot (long only)</button>
+        </div>
+        <PairChips symbols={form.symbols} onChange={(symbols) => set({ symbols })} setError={setError} />
+        <div className="bt-grid">
+          <label>Timeframe<select value={form.interval} onChange={(e) => set({ interval: e.target.value })}>{INTERVALS.map((v) => <option key={v}>{v}</option>)}</select></label>
+          <label>History<select value={form.candles} onChange={(e) => set({ candles: e.target.value })}><option value={1000}>1,000 candles</option><option value={3000}>3,000 candles</option><option value={5000}>5,000 candles</option></select></label>
+          <label>Min reward:risk<input type="number" min="0" max="5" step="0.5" value={form.minRewardRisk} onChange={(e) => set({ minRewardRisk: e.target.value })} /></label>
+        </div>
+        <button type="button" className="primary-button" disabled={busy || form.symbols.length === 0} onClick={run}>{busy ? "Testing every strategy…" : "Compare all strategies"}</button>
+        {busy && <p className="an-hint">Loading the history once and replaying {strategies.length} strategies: 15 to 40 seconds.</p>}
+        {error && <p className="order-error">{error}</p>}
+      </section>
+
+      <section className="panel bt-output">
+        {!result && !busy && <p className="log-empty">Press "Compare all strategies" to see them side by side on identical footing.</p>}
+        {result && (
+          <div className="bt-results">
+            <div className="bt-table" role="table">
+              <div className="bt-row bt-cmp bt-head" role="row"><span>Strategy</span><span>Trades</span><span>Win</span><span>Expectancy</span><span>PF</span><span>Total</span><span>Drawdown</span><span /></div>
+              {rows.map((r) => (
+                <div className="bt-row bt-cmp" role="row" key={r.id}>
+                  <span title={r.summary}><b>{r.name}</b><small className={`cmp-verdict ${verdictClass(r.verdict)}`}>{r.verdict.label}</small></span>
+                  <span>{r.stats.trades}</span>
+                  <span>{r.stats.winRate == null ? "—" : `${r.stats.winRate.toFixed(0)}%`}</span>
+                  <span className={tone(r.stats.trades ? r.stats.expectancyR : null)}>{signedR(r.stats.trades ? r.stats.expectancyR : null)}</span>
+                  <span>{pf(r.stats)}</span>
+                  <span className={tone(r.stats.trades ? r.stats.totalR : null)}>{signedR(r.stats.trades ? r.stats.totalR : null)}</span>
+                  <span>{r.stats.trades ? `${r2(r.stats.equity.maxDrawdownPct, 0)}%` : "—"}</span>
+                  <span><button type="button" className="link-button" onClick={() => onOpen(r.id)}>Open</button></span>
+                </div>
+              ))}
+            </div>
+            {result.pairs.some((p) => p.error) && <p className="order-error">{result.pairs.filter((p) => p.error).map((p) => `${p.symbol}: ${p.error}`).join(" · ")}</p>}
+            <p className="order-rule-note">
+              Every strategy enters with a limit order at its signal close and uses its own stop and target, so the table compares signals, not trade management. Read it with care: with this many strategies the best one is often just the luckiest
+              (test several timeframes and other pairs before believing it), and a strategy with few trades says little.
+            </p>
+          </div>
+        )}
+      </section>
+    </div>
   );
 }
 
 // ---------------------------------------------------------------- notifications tab
 
-function AlertsTab({ data, timeZone }) {
+function AlertsTab({ channels, timeZone }) {
   const [permission, setPermission] = useState(desktopPermission);
   const [sound, setSound] = useState(audioState);
   const [msg, setMsg] = useState(null);
   const [busy, setBusy] = useState(false);
-  const channels = data.channels;
 
   const test = async () => {
     setBusy(true);
@@ -496,6 +666,8 @@ function AlertsTab({ data, timeZone }) {
     }
   };
 
+  const tg = channels?.telegram?.configured;
+  const wh = channels?.webhook?.configured;
   return (
     <div className="alerts-layout">
       <section className="panel">
@@ -514,12 +686,12 @@ function AlertsTab({ data, timeZone }) {
           <span className={`chan-state ${sound === "running" ? "is-on" : "is-off"}`}>{sound === "running" ? "ready" : sound}</span>
         </div>
         <div className="chan">
-          <div><b>Telegram</b><p>{channels.telegram.configured ? "Configured: every signal, order, fill and close is also sent to your chat, even when nothing is open." : <>Not set up. Create a bot with @BotFather, send it a message, then set <code>TELEGRAM_BOT_TOKEN</code> and <code>TELEGRAM_CHAT_ID</code> in the server environment and restart.</>}</p></div>
-          <span className={`chan-state ${channels.telegram.configured ? "is-on" : "is-off"}`}>{channels.telegram.configured ? "configured" : "not set up"}</span>
+          <div><b>Telegram</b><p>{tg ? "Configured: every signal, order, fill and close is also sent to your chat, even when nothing is open." : <>Not set up. Create a bot with @BotFather, send it a message, then set <code>TELEGRAM_BOT_TOKEN</code> and <code>TELEGRAM_CHAT_ID</code> in the server environment and restart.</>}</p></div>
+          <span className={`chan-state ${tg ? "is-on" : "is-off"}`}>{tg ? "configured" : "not set up"}</span>
         </div>
         <div className="chan">
-          <div><b>Webhook</b><p>{channels.webhook.configured ? "Configured: each event is POSTed as JSON (title, body, plan) to your URL." : <>Not set up. Set <code>NOTIFY_WEBHOOK_URL</code> to any https address (Discord, Slack, Zapier, Make, your own server) and restart.</>}</p></div>
-          <span className={`chan-state ${channels.webhook.configured ? "is-on" : "is-off"}`}>{channels.webhook.configured ? "configured" : "not set up"}</span>
+          <div><b>Webhook</b><p>{wh ? "Configured: each event is POSTed as JSON (title, body, plan) to your URL." : <>Not set up. Set <code>NOTIFY_WEBHOOK_URL</code> to any https address (Discord, Slack, Zapier, Make, your own server) and restart.</>}</p></div>
+          <span className={`chan-state ${wh ? "is-on" : "is-off"}`}>{wh ? "configured" : "not set up"}</span>
         </div>
         <button type="button" className="primary-button" disabled={busy} onClick={test}>Send a test notification</button>
         {msg && <p className="order-note">{msg}</p>}
@@ -532,46 +704,60 @@ function AlertsTab({ data, timeZone }) {
 
 // ---------------------------------------------------------------- the screen
 
-const TABS = [["backtest", "Backtest"], ["auto", "Auto trading"], ["alerts", "Notifications"]];
+const TABS = [["strategies", "Strategies"], ["compare", "Compare"], ["alerts", "Notifications"]];
 
-export default function AmdBotPanel({ risk, timeZone = "UTC", initialTab = "backtest" }) {
-  const [tab, setTab] = usePersistentState("pref:amd-bot-tab", initialTab, oneOf(TABS.map(([id]) => id)));
-  const [data, setData] = useState(null);
+export default function StrategiesPanel({ risk, timeZone = "UTC", chartStrategies = [], onShowOnChart = () => {} }) {
+  const [tab, setTab] = usePersistentState("pref:strategies-tab", "strategies", oneOf(TABS.map(([id]) => id)));
+  const [selected, setSelected] = usePersistentState("pref:strategy-id", "amd_fvg", (v) => typeof v === "string");
+  const [list, setList] = useState(null);
   const [error, setError] = useState(null);
-  const [draft, setDraft] = useState(null);
-  const draftReady = useRef(false);
-
-  const reload = useMemo(() => async () => {
-    const next = await getAmdStatus();
-    setData(next);
-    setError(null);
-    if (!draftReady.current) { draftReady.current = true; setDraft(next.config); }
-    else setDraft((d) => (d && JSON.stringify(d) !== JSON.stringify(next.config) && draftIsClean.current ? next.config : d));
-  }, []);
-  const draftIsClean = useRef(true);
-  useEffect(() => { draftIsClean.current = !data || !draft || JSON.stringify(draft) === JSON.stringify(data.config); }, [data, draft]);
 
   useEffect(() => {
-    reload().catch((err) => setError(err.message));
-    const id = window.setInterval(() => reload().catch(() => {}), 10_000);
+    const load = () => getStrategies().then((d) => { setList(d); setError(null); }).catch((err) => setError(err.message));
+    load();
+    const id = window.setInterval(load, 10_000);
     return () => window.clearInterval(id);
-  }, [reload]);
+  }, []);
+
+  const strategies = list?.strategies ?? [];
+  const current = strategies.find((s) => s.id === selected) ?? strategies[0];
+  const badge = (s) => (s.bot?.ordering ? { text: "ordering", cls: "is-order" } : s.bot?.watching ? { text: "watching", cls: "is-watch" } : null);
 
   return (
     <div className="amdbot-view">
       <div className="amdbot-head">
         <div>
-          <h2>AMD bot</h2>
-          <p>Accumulation, Manipulation, FVG, Distribution: test it on history, trade it automatically, get told when it fires.</p>
+          <h2>Strategies</h2>
+          <p>Every strategy can be tested on history, shown on the chart, traded automatically, and announced. Pick one, or compare them all.</p>
         </div>
-        <div className="segmented" role="tablist" aria-label="AMD bot sections">
+        <div className="segmented" role="tablist" aria-label="Strategy sections">
           {TABS.map(([id, label]) => <button key={id} type="button" role="tab" aria-selected={tab === id} className={tab === id ? "is-active" : ""} onClick={() => setTab(id)}>{label}</button>)}
         </div>
       </div>
-      {error && !data && <div className="futures-notice is-error"><strong>Could not reach the server</strong><p>{error}</p></div>}
-      {tab === "backtest" && <BacktestTab timeZone={timeZone} botConfig={data?.config} onUseSettings={(patch) => { setDraft((d) => ({ ...(d ?? data?.config), ...patch })); setTab("auto"); }} />}
-      {tab === "auto" && data && draft && <AutoTab risk={risk} timeZone={timeZone} data={data} reload={reload} draft={draft} setDraft={setDraft} />}
-      {tab === "alerts" && data && <AlertsTab data={data} timeZone={timeZone} />}
+      {error && !list && <div className="futures-notice is-error"><strong>Could not reach the server</strong><p>{error}</p></div>}
+
+      {tab === "strategies" && list && current && (
+        <div className="strat-layout">
+          <nav className="strat-list" aria-label="Strategies">
+            {strategies.map((s) => {
+              const b = badge(s);
+              return (
+                <button key={s.id} type="button" className={`strat-item${s.id === current.id ? " is-active" : ""}`} aria-current={s.id === current.id} onClick={() => setSelected(s.id)}>
+                  <b>{s.name}</b>
+                  <span>{s.summary}</span>
+                  <em>
+                    {b && <i className={`strat-badge ${b.cls}`}>{b.text}</i>}
+                    {chartStrategies.includes(s.id) && <i className="strat-badge is-chart">on chart</i>}
+                  </em>
+                </button>
+              );
+            })}
+          </nav>
+          <StrategyDetail key={current.id} strategy={current} risk={risk} timeZone={timeZone} onShowOnChart={onShowOnChart} onChartList={chartStrategies} />
+        </div>
+      )}
+      {tab === "compare" && list && <CompareTab strategies={strategies} onOpen={(id) => { setSelected(id); setTab("strategies"); }} />}
+      {tab === "alerts" && list && <AlertsTab channels={list.channels} timeZone={timeZone} />}
     </div>
   );
 }

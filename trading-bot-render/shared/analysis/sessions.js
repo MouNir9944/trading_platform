@@ -149,3 +149,17 @@ export function hourlyProfile(candles, timeZone) {
   const quiet = [...scored].filter((h) => h.samples).sort((a, b) => a.avgVolume - b.avgVolume).slice(0, 3).map((h) => h.hour).sort((a, b) => a - b);
   return { hours: scored, top, quiet, days: Math.round(candles.length / 24) };
 }
+
+/** Runs of consecutive candles whose local hour (in `timeZone`) is one of `hours`. Used to shade the busiest hours on the chart. */
+export function peakHourSegments(candles, timeZone, hours) {
+  if (!hours || hours.length === 0) return [];
+  const set = new Set(hours);
+  const segments = [];
+  candles.forEach((candle, index) => {
+    const isPeak = set.has(zonedParts(candle.time, timeZone).hour);
+    const last = segments[segments.length - 1];
+    if (last && last.isPeak === isPeak) last.endIndex = index + 1;
+    else segments.push({ isPeak, startIndex: index, endIndex: index + 1 });
+  });
+  return segments.filter((s) => s.isPeak);
+}

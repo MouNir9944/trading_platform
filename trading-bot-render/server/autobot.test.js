@@ -5,11 +5,14 @@ import path from "node:path";
 import test from "node:test";
 
 import { checkOrder, computeRiskState, normalizeSettings } from "../shared/risk.js";
-import { AutoAmd, INTERVAL_MS, normalizeAutoConfig } from "./autoAmd.js";
+import { STRATEGY_BY_ID } from "../shared/strategies/index.js";
+import { AutoTrader, INTERVAL_MS, createBots, normalizeAutoConfig as normalize } from "./autoTrader.js";
 import { Notifier } from "./notifier.js";
 import { RiskBlockedError } from "./orders.js";
 import { FileStore } from "./store.js";
 
+const AMD = STRATEGY_BY_ID.amd_fvg;
+const normalizeAutoConfig = (patch, current) => normalize(AMD, patch, current);
 const MS = INTERVAL_MS["15m"];
 const T = Math.floor(1_800_000_000_000 / MS) * MS; // the start of the candle that is "now"
 const NOW = T + 20_000;
@@ -61,7 +64,7 @@ function fakeManager(clock, modeRef, getSettings) {
   };
 }
 
-async function makeBot({ candles = candleList(), mode = "testnet", risk = { minRewardRisk: 1 }, dir = fs.mkdtempSync(path.join(os.tmpdir(), "bot-")), env = {}, fetchFn = async () => new Response("{}", { status: 200 }), rows } = {}) {
+async function makeBot({ candles = candleList(), mode = "paper", risk = { minRewardRisk: 1 }, dir = fs.mkdtempSync(path.join(os.tmpdir(), "bot-")), env = {}, fetchFn = async () => new Response("{}", { status: 200 }), rows } = {}) {
   const clock = { now: NOW };
   const modeRef = { mode };
   const store = new FileStore({ dir });
@@ -71,8 +74,8 @@ async function makeBot({ candles = candleList(), mode = "testnet", risk = { minR
   const spot = fakeManager(clock, modeRef, settings);
   const futures = fakeManager(clock, modeRef, settings);
   const feed = { rows: rows ?? klines(candles), calls: 0 };
-  const bot = new AutoAmd({
-    store, notifier,
+  const bot = new AutoTrader({
+    strategy: AMD, store, notifier,
     getMode: () => modeRef.mode,
     getKlines: async () => { feed.calls += 1; return feed.rows; },
     managers: { spot, futures },
@@ -104,7 +107,8 @@ test("bot settings are validated, and spot can never be set to short", () => {
     [{ pairs: Array.from({ length: 13 }, (_, i) => ({ symbol: `COIN${i}USDT`, interval: "15m" })) }, /at most 12/],
     [{ watch: "yes" }, /true or false/],
     [{ entryMode: "market" }, /entryMode/],
-    [{ engine: { maxRangeAtr: 99 } }, /maxRangeAtr/],
+    [{ params: { maxRangeAtr: 99 } }, /Max range height/],
+    [{ params: { nope: 1 } }, /no setting called/],
   ]) assert.throws(() => normalizeAutoConfig(patch), pattern, JSON.stringify(patch));
   assert.equal(normalizeAutoConfig({ armedMode: "live" }).armedMode, null, "arming is not a setting");
 });
@@ -114,13 +118,13 @@ test("arming orders is deliberate: pairs are needed, LIVE needs the word LIVE, a
   await assert.rejects(bot.setConfig({ orders: true }), /at least one pair/);
   await bot.setConfig({ pairs: [pair], market: "spot" });
   const armed = await bot.setConfig({ orders: true });
-  assert.equal(armed.armedMode, "testnet");
+  assert.equal(armed.armedMode, "paper");
   assert.equal(armed.watch, true, "orders imply watching");
   assert.equal(bot.status().ordering, true);
 
   modeRef.mode = "live";
   assert.equal(bot.status().ordering, false, "switching the account switches the orders off");
-  assert.match(bot.status().blocked, /armed for testnet, the account is now on live/);
+  assert.match(bot.status().blocked, /armed for paper, the account is now on live/);
   await bot.setConfig({ orders: false });
   assert.equal(bot.getConfig().armedMode, null);
   await assert.rejects(bot.setConfig({ orders: true }), /needs the word LIVE/);
@@ -141,7 +145,7 @@ test("watching: a fresh signal is announced once, from closed candles only, and 
   const [signal] = notifier.list().events;
   assert.equal(signal.type, "signal");
   assert.equal(signal.dir, "bull");
-  assert.match(signal.title, /AMD buy signal · BTCUSDT 15m/);
+  assert.match(signal.title, /AMD: sweep then fair value gap: buy signal · BTCUSDT 15m/);
   assert.ok(signal.plan.entry === 99.4 && signal.plan.stopLoss < 97.9 && signal.plan.target === 101.7);
   assert.equal(spot.calls.length, 0, "watching never orders");
   assert.equal(notifier.list().events.length, 1);
@@ -222,7 +226,7 @@ test("a refusal by the order manager is reported with its reason", async () => {
   await bot.setConfig({ pairs: [pair], market: "spot" });
   await bot.setConfig({ orders: true });
   await bot.tick();
-  const event = notifier.list().events.find((e) => /Blocked by your risk rules/.test(e.title));
+  const event = notifier.list().events.find((e) => /blocked by your risk rules/.test(e.title));
   assert.equal(event.type, "skipped");
   assert.match(event.body, /Daily loss limit/);
   assert.equal(bot.status().pending.length, 0);
@@ -334,14 +338,14 @@ test("it remembers across a restart: no repeated signals, and the armed state an
   const store = new FileStore({ dir: first.dir });
   const notifier = new Notifier({ store, now: () => NOW });
   await notifier.init();
-  const again = new AutoAmd({
-    store, notifier, getMode: () => "testnet", getKlines: async () => klines(candleList()),
+  const again = new AutoTrader({
+    strategy: AMD, store, notifier, getMode: () => "paper", getKlines: async () => klines(candleList()),
     managers: { spot: first.spot, futures: first.futures }, getRiskSettings: () => normalizeSettings({ minRewardRisk: 1 }),
     getBalance: async () => ({ wallet: 1000, available: 1000 }), now: () => NOW,
   });
   await again.init();
   assert.equal(again.getConfig().orders, true);
-  assert.equal(again.getConfig().armedMode, "testnet");
+  assert.equal(again.getConfig().armedMode, "paper");
   assert.equal(again.status().pending.length, 1);
   const before = notifier.list().events.length;
   await again.tick({ force: true });
@@ -404,4 +408,65 @@ test("Telegram and webhook: only what is configured is used, failures are record
   const skipped = await n.push({ type: "skipped", title: "Quiet", external: false });
   assert.deepEqual(skipped.delivery, {}, "events marked internal are not sent out");
   assert.equal((await n.test()).event.type, "test");
+});
+
+// ---- several strategies ----
+
+test("each strategy has its own bot, settings and state, and a symbol already traded is left alone", async () => {
+  const supertrend = STRATEGY_BY_ID.supertrend;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "bots-"));
+  const store = new FileStore({ dir });
+  const notifier = new Notifier({ store, env: {}, fetchFn: async () => new Response("{}"), now: () => NOW });
+  await notifier.init();
+  const clock = { now: NOW };
+  const settings = () => normalizeSettings({ minRewardRisk: 1 });
+  const spot = fakeManager(clock, { mode: "paper" }, settings);
+  const futures = fakeManager(clock, { mode: "paper" }, settings);
+  let busy = false;
+  const bots = createBots([AMD, supertrend], {
+    store, notifier, getMode: () => "paper", getKlines: async () => klines(candleList()), managers: { spot, futures },
+    getRiskSettings: settings, getBalance: async () => ({ wallet: 1000, available: 1000 }), isBusy: () => busy, now: () => NOW,
+  });
+  await bots.init();
+  assert.deepEqual(bots.all().map((b) => b.strategy.id), ["amd_fvg", "supertrend"]);
+
+  await bots.get("supertrend").setConfig({ watch: true, pairs: [pair] });
+  assert.equal(bots.get("amd_fvg").getConfig().watch, false, "another strategy's switches are not touched");
+  assert.equal(bots.get("supertrend").getConfig().shorts, false, "a long-only strategy cannot be set to short");
+  assert.deepEqual(bots.get("supertrend").getConfig().params, { atrPeriod: 10, multiplier: 3, rewardR: 2 }, "its own settings start at their defaults");
+  await bots.get("supertrend").setConfig({ params: { multiplier: 2 } });
+  assert.equal(bots.get("supertrend").getConfig().params.multiplier, 2);
+  assert.equal(bots.get("supertrend").getConfig().params.atrPeriod, 10, "only the given setting changes");
+  await assert.rejects(bots.get("supertrend").setConfig({ entryMode: "retest" }), /no retest entry/);
+  await assert.rejects(bots.get("supertrend").setConfig({ params: { minRangeBars: 12 } }), /no setting called/);
+
+  // an order on the symbol from anyone else stops a second strategy from stacking another one
+  await bots.get("amd_fvg").setConfig({ pairs: [pair], market: "spot" });
+  await bots.get("amd_fvg").setConfig({ orders: true });
+  busy = true;
+  await bots.get("amd_fvg").tick({ force: true });
+  assert.equal(spot.calls.length, 0);
+  const skip = notifier.list().events.find((e) => e.type === "skipped");
+  assert.match(skip.body, /already an open BTCUSDT order or position/);
+  assert.equal(skip.strategy, "amd_fvg");
+  assert.equal(notifier.list({ strategy: "supertrend" }).events.length, 0, "events are filed under their own strategy");
+  assert.ok(notifier.list({ strategy: "amd_fvg" }).events.length >= 2);
+  busy = false;
+  await bots.flush();
+});
+
+test("settings saved by the AMD-only bot of earlier versions are picked up, with the old names translated", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "legacy-"));
+  const store = new FileStore({ dir });
+  await store.setSetting("auto_amd", { watch: true, orders: false, market: "spot", pairs: [pair], entryMode: "fvg-retest", targetMode: "range", engine: { minRangeBars: 14, maxRangeAtr: 3, minRewardRisk: 1.5 } });
+  const notifier = new Notifier({ store, env: {}, now: () => NOW });
+  await notifier.init();
+  const settings = () => normalizeSettings({});
+  const bots = createBots([AMD], { store, notifier, getMode: () => "paper", getKlines: async () => [], managers: { spot: fakeManager({ now: NOW }, {}, settings), futures: fakeManager({ now: NOW }, {}, settings) }, getRiskSettings: settings, getBalance: async () => ({ wallet: 1, available: 1 }), now: () => NOW });
+  await bots.init();
+  const c = bots.get("amd_fvg").getConfig();
+  assert.deepEqual([c.watch, c.market, c.entryMode, c.targetMode, c.minRewardRisk], [true, "spot", "retest", "own", 1.5]);
+  assert.equal(c.params.minRangeBars, 14);
+  assert.equal(c.params.maxRangeAtr, 3);
+  assert.equal(c.params.maxFvgBars, 8, "settings added since keep their default");
 });

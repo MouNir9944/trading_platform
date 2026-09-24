@@ -15,7 +15,7 @@ server/store.js  Storage: MongoDB (MONGODB_URI) or local JSON files (dev fallbac
 
 ```bash
 npm install
-cp .env.example .env      # fill in your Testnet keys; loaded automatically via --env-file
+cp .env.example .env      # paper mode needs no keys at all; add live keys only if/when you want live mode
 npm run dev               # API on :8000, Vite on :5173 (open http://localhost:5173)
 ```
 
@@ -68,36 +68,57 @@ browser on the candles the chart already has, so it adds no server load and no B
   range) and exits on a bearish one. It uses no look-ahead (a test checks it). Backtest it before trusting it: on
   46 long trades across 6 futures pairs and 3 timeframes (1500 candles each) it won 39% with an average of -0.09% per
   trade after fees, so it is a way to *find* setups, not a proven edge.
-  Alerts, automatic orders and the backtest live on the **AMD Bot** screen (see next item).
-- **AMD Bot** (header, `/#amd`; `server/autoAmd.js`, `server/notifier.js`, `shared/analysis/amdTrade.js`), three tabs:
-  - **Backtest**: replays the exact orders the bot would place on up to 5000 candles of real Binance history for up to
-    12 pairs: a limit order after each signal candle closes (at the close, or on a retest of the gap), stop under the
-    sweep, target the far side of the range or a multiple of the risk. Realism rules: the order lapses after N candles;
-    a fill happens at the limit price (at the open on a gap); if price reaches the target before the entry fills the
-    trade is missed, never chased; if stop and target are inside one candle the stop wins; only the stop can end a
-    trade on the candle that fills it; fees both ways; one position per pair; unfinished trades are left out. Output:
-    verdict, expectancy in R, win rate, profit factor, drawdown, longest losing run, average planned reward:risk,
-    first-half/second-half stability, equity curve, per-pair table with buy & hold, a comparison of 8 entry/target
-    variants (fitting to the past: read it as noise, not as a recipe), and the latest trades.
-    **Honest result:** on 3000 15m candles (about 31 days) of 10 futures pairs the default settings gave 180 trades,
-    41% wins, **-0.14R per trade after fees** (profit factor 0.76), and the two halves of the sample disagreed. On other
-    timeframes it was around break-even. The signal finds setups; it is not a proven edge.
-  - **Auto trading**: the server (not the browser) checks your pairs every 30 seconds, once per closed candle, so it
-    works with every tab closed. Two separate switches: *watch and notify* (no orders) and *automatic orders*. Orders go
-    through the same order managers as manual ones, so every rule of the Risk tab still applies (risk per trade, max
-    position, minimum reward:risk, leverage, daily loss, pause switch) and each order gets its stop-loss and take-profit
-    on Binance. Its own limits: max open orders and max orders per day, one order per pair, spot is long-only, an
-    unfilled entry is cancelled after N candles, and a signal older than 2 candles is ignored. Arming is tied to the
-    current account: it requires a backtest of the exact settings first, an explicit acknowledgement when that backtest
-    lost money, and the word `LIVE` on the live account; switching between Testnet and Live switches it off. Orders the
-    risk rules refuse are reported as "order not placed" with the reason. The Risk tab default (minimum reward:risk 1.5)
-    is above what these signals average (about 1.45), so with defaults many orders are refused: the screen warns you.
-  - **Notifications**: every signal, order, fill, close, error and arm/disarm becomes an event stored on the server
-    (kept across restarts). The 🔔 in the header shows unread events, with cards, a chime and optional system
-    notifications, and anything that happened while you were away is waiting as unread. Optional outbound channels are
-    set with environment variables on the server: `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`, and
-    `NOTIFY_WEBHOOK_URL` (JSON POST). "Send a test notification" shows what each channel answered. Telegram and
-    webhook delivery is covered by tests with a fake network only; test them once with your own bot before relying on them.
+  Alerts, automatic orders and the backtest are part of the strategy platform (next item).
+- **Strategy platform** (header "Strategies", `/#strategies`; `shared/strategies/`, `server/autoTrader.js`, `server/notifier.js`).
+  Every strategy is one object with the same contract, and everything works with any registered strategy:
+  1. **On the chart**: the *Strategies* menu in the chart toolbar. Tick any strategies (each gets a colour) to see their
+     signals: a marker on the signal candle, a green reward zone and a red risk zone from the entry, and the result
+     (target, stop, open, waiting, not filled). Nothing is traded. A ticked strategy has a ⚙ with its own settings
+     (periods, thresholds, stop distance, target multiple, plus entry, target and minimum reward:risk); they are
+     kept in the browser and only affect what is drawn.
+  2. **Backtest**: replays the exact orders the bot would place on up to 5000 candles of real Binance history for up to
+     12 pairs: a limit order after each signal candle closes (at the signal price, or on a retest for strategies that
+     have one), stop and target from the strategy or a multiple of the risk. Realism rules: the order lapses after N
+     candles; a fill happens at the limit price (at the open on a gap); if price reaches the target before the entry
+     fills the trade is missed, never chased; if stop and target are inside one candle the stop wins; only the stop can
+     end a trade on the candle that fills it; fees both ways; one position per pair; unfinished trades are left out.
+     Output: verdict, expectancy in R, win rate, profit factor, drawdown, longest losing run, average planned reward:risk,
+     first-half/second-half stability, equity curve, per-pair table with buy & hold, a comparison of entry/target
+     variants (fitting to the past: read it as noise, not as a recipe), and the latest trades.
+  3. **Compare**: every strategy on the same pairs, history and fees, each with its default settings, ranked by
+     expectancy. With this many strategies the best one is often just the luckiest, so test other timeframes and pairs.
+  4. **Auto trading** (one independent bot per strategy): the server (not the browser) checks your pairs every 30
+     seconds, once per closed candle, so it works with every tab closed. Two separate switches: *watch and notify* (no
+     orders) and *automatic orders*. Orders go through the same order managers as manual ones, so every rule of the Risk
+     tab still applies (risk per trade, max position, minimum reward:risk, leverage, daily loss, pause switch) and each
+     order gets its stop-loss and take-profit on Binance. Its own limits: max open orders and max orders per day, one
+     order per symbol (also when another strategy, or you, already hold one), spot is long-only, an unfilled entry is
+     cancelled after N candles, and a signal older than 2 candles is ignored. Arming is tied to the current account: it
+     requires a backtest of the exact settings first, an explicit acknowledgement when that backtest lost money, and the
+     word `LIVE` on the live account; switching between Paper and Live switches it off. Orders the risk rules refuse
+     are reported as "order not placed" with the reason.
+  5. **Notifications**: every signal, order, fill, close, error and arm/disarm becomes an event stored on the server
+     (kept across restarts), tagged with its strategy. The 🔔 in the header shows unread events, with cards, a chime and
+     optional system notifications; anything that happened while you were away is waiting as unread. Optional outbound
+     channels are set with environment variables on the server: `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`, and
+     `NOTIFY_WEBHOOK_URL` (JSON POST). "Send a test notification" shows what each channel answered. Telegram and webhook
+     delivery is covered by tests with a fake network only; test them once with your own bot before relying on them.
+
+  Registered strategies: **AMD** (sweep then fair value gap, long and short, with a retest entry), MA crossover +
+  breakout, RSI oversold reversal, MACD momentum, Bollinger squeeze breakout, Supertrend follower, Structure break
+  (BOS / CHoCH), Smart money gap / order-block retest, Trend pullback (the last eight are long-only).
+  **Honest result** (3000 15m candles, about 31 days, 10 futures pairs, entry at the signal close, own stop and target,
+  fees included): none of them made money. MACD momentum was flat (+0.00R per trade), Structure break and Supertrend about
+  -0.02R, the rest between -0.10R and -0.17R (AMD: -0.16R). That is one month of one market: it says the strategies as
+  written are not a free edge, not that no variation works, and it is exactly the kind of check the platform is for.
+
+  **Adding a strategy** takes one file. Create `shared/strategies/<name>.js` exporting
+  `{ id, name, summary, description, directions: ["long"] | ["long","short"], supportsRetest, params: [{ key, label, default, min, max, step, integer?, hint? }], detect(candles, params) }`
+  where `detect` returns signals `{ dir: "bull" | "bear", formedAt, entry, stop, target, retest?, reasons: [] }`, then add it to
+  `STRATEGIES` in `shared/strategies/index.js`. The chart menu, backtest, comparison, automatic trader, notifications and
+  the settings form all pick it up. The one rule is **no look-ahead**: a signal on candle `i` may only use candles
+  `0..i`. `server/strategies.test.js` runs every registered strategy through the contract (well-formed signals, pure,
+  no look-ahead on several series, a full backtest), so a new strategy is checked by being registered.
 - **Markets and asset classes** (header picker): a **Spot / Futures** switch and asset-class filters
   (Crypto, Stocks, Commodities, Forex, Other), each ranked with class-appropriate rules (a healthy 24h range is
   1-4% for a stock, 0.3-1.5% for a currency, 2-8% for a crypto) and sized with class-appropriate stop distances.
@@ -123,18 +144,16 @@ browser on the candles the chart already has, so it adds no server load and no B
     - if the stop-loss cannot be placed after a fill the position is closed at once; a stop or target cancelled on
       Binance is placed again; a position closed outside the app (or liquidated) closes its record;
     - live orders ask for confirmation. Funding fees are not included in the P&L shown.
-    Keys: futures use their **own** keys. For **Testnet** create them in Binance Demo Trading (futures) and set
-    `BINANCE_FUTURES_API_KEY` / `BINANCE_FUTURES_API_SECRET` (host `https://demo-fapi.binance.com`, override with
-    `BINANCE_FUTURES_TESTNET_URL`); your Spot testnet keys do not work there. For **live** set
-    `BINANCE_FUTURES_API_KEY_real` / `_SECRET_real`, or enable Futures on your live key. TradFi contracts (stocks,
-    commodities) also need Binance's TradFi-perpetuals agreement accepted on your account. Everything above was
-    tested against a local stand-in for the futures API and unit tests; run a Testnet trade end to end before using
+    Keys: **paper** mode needs no keys at all, spot or futures. For **live** set `BINANCE_FUTURES_API_KEY_real` /
+    `_SECRET_real`, or enable Futures on your live key (falls back to the live Spot key pair). TradFi contracts
+    (stocks, commodities) also need Binance's TradFi-perpetuals agreement accepted on your account. Everything above
+    was tested against a local stand-in for the futures API and unit tests; run a paper trade end to end before using
     real money.
 - **Charts** (header switch "Trading / Charts / My stocks"): a grid of 1, 2, 4, 6 or 9 live charts to follow several pairs
   at once. Each chart has its own market (Spot or Futures), pair and timeframe. The pair button opens a picker with
   **every** listed pair (about 480 spot and 720 futures: crypto, stocks, commodities, forex), a **quote** selector (USDT,
   USDC, BTC, EUR, TRY, BRL…), asset-class chips, search, sorting, and a "use this symbol" fallback. Charts always use
-  **live public market data**, whatever the Testnet / Live switch says (`source=live` on the market endpoints),
+  **live public market data**, whatever the Paper / Live switch says (`source=live` on the market endpoints),
   with volume, a 21 EMA, the 24h change and a live price from Binance's stream;
   **Trade ↗** opens that pair on the
   trading screen. Layout, pairs and timeframes are remembered. **Open in new tab** (or the address `/#charts`) puts the
@@ -161,7 +180,7 @@ browser on the candles the chart already has, so it adds no server load and no B
 - **My stocks** (header switch "Trading / My stocks"): your **Binance Stocks** account (US stocks and ETFs such as GLD,
   MRVL, MAGS), which is a *separate product from Spot* with its own API (`/sapi/v1/equity/*`), so these holdings never
   appear in the Spot balance. It exists on the **live** account only: this view always uses your live keys and ignores the
-  Testnet / Live switch, and the key needs permission to use Binance Stocks. Binance has **no holdings endpoint** for
+  Paper / Live switch, and the key needs permission to use Binance Stocks. Binance has **no holdings endpoint** for
   stocks, so holdings are rebuilt from your executed trades (average cost, order fees included in the cost) and valued
   at the live bid; on the author's account the quantities and cost prices match the Binance app exactly. Deposits,
   transfers and corporate actions are not counted. The ticket buys or sells at **market** (buy by amount, sell by
@@ -195,6 +214,18 @@ browser on the candles the chart already has, so it adds no server load and no B
   inverse funds, commodity funds and high cost. A one-line **combined read** puts the chart and the company side by side
   (agree, strong business in a weak chart, strong chart on weak numbers, and so on). Like the chart analysis it is an
   unofficial data source and only sees published numbers, not the products, competition, management or news; it is not advice.
+- **Performance** (header "Performance", `/#performance`; `shared/analysis/performance.js`, `server/stocks.js`'s
+  `realizedTrades`): how the account has actually done, not a backtest — realized profit and loss bucketed by
+  **day and month**, in your own time zone. Two tabs:
+  - **Trading**: every **closed** spot and futures order on the selected account (Paper/Live), with an All/Spot/Futures
+    filter. Summary tiles (realized P/L, win rate, average per trade and per day, best/worst day, trading days, current
+    winning/losing streak in days), a daily bar chart with a 7D/30D/90D/1Y/All period picker, a full monthly bar chart,
+    a "by pair" breakdown and the most recently closed trades. Refreshes every 30 seconds.
+  - **Stocks**: the same, from Binance Stocks' own trade history (executed sells, average-cost method, order fees
+    included — the same accounting `buildPositions` uses for holdings, but as a per-sale stream instead of a running
+    total). Live account only. The (paginated) history fetch is cached on the server for a minute; day/month bucketing
+    happens in the browser in your time zone, so switching time zone never re-fetches from Binance.
+  Bars are plain SVG (green up / red down from a zero line), not a live-updating chart — these are historical totals.
 - **Risk management** (Risk tab, header tile, and the order ticket). Rules are **enforced by the server on every
   order**, so no screen can bypass them, and previewed in the ticket with a one-click "fit size to my limits":
   risk per trade (% of capital lost if the stop fills, fees included, default 1%), max position size (25%), max total
@@ -212,12 +243,22 @@ browser on the candles the chart already has, so it adds no server load and no B
   Editing size, stop or target by hand switches Auto off; "Apply to ticket" turns it back on. It also reads Binance's
   **minimum order value** for the pair, and both the ticket and the server refuse orders below it. Switching pair
   clears the previous pair's entry price. Orders already placed keep their original stop and target.
+- **Drag the order straight on the chart**: while a ticket is being set up (Trade tab, spot or futures), its entry,
+  take-profit and stop-loss are drawn on the chart as a box with three draggable rows — drag the entry line, or the
+  edge of the green (reward) or red (risk) zone, and the ticket's fields update live to match, in your own account's
+  base currency price. Dragging the entry keeps the stop and target at their current price and re-derives the
+  percentages, so the other two lines do not jump; dragging the stop or target moves only that one. This is a
+  different way to fill in the *same* fields as typing a percentage — it turns "Auto" off exactly like a manual edit,
+  and every value it produces goes through the *same* risk check as any other order: if what you drag to would be
+  refused (a stop too tight for the reward:risk minimum, a size over the position or open-risk limit, and so on), the
+  box turns red with a "Blocked by risk rules" flag and the submit button stays disabled — the server enforces the
+  same rules again regardless, so dragging can never place an order that typing the numbers by hand could not.
 - **Pair picker and ranking** (header): click the pair name to search every tradable USDT pair and compare them by
   price, 24h move, volume and **market cap** (with a bar, and "×47 bigger / smaller than the current pair"). Each
   pair gets a 0-100 **trade score** (liquidity 35%, spread 20%, a 24h range of 2-8% 25%, activity 10%, market-cap size
   10%) and the best three are shown first with the reasons. Pairs with under $1M of 24h volume are listed but not
-  scored. Data: live Binance public 24h stats (even in Testnet mode, whose volumes are synthetic; only pairs
-  available on Testnet are listed) plus market caps from **CoinGecko's free public API**, cached for 15 minutes
+  scored. Data: live Binance public 24h stats (paper mode already trades against the same live data) plus market
+  caps from **CoinGecko's free public API**, cached for 15 minutes
   (the server makes that request; nothing about you is sent). If CoinGecko is unreachable the ranking still works,
   without market caps. The score is a screening aid, not advice or a prediction.
 - **Full chart controls** (chart toolbar): **Fit** zooms out to every candle loaded; **All history** pages back through
@@ -241,7 +282,7 @@ Indicators are not advice, and a good backtest does not guarantee future results
 
 ## Database (MongoDB)
 
-Orders, order limits and the Testnet/Live mode are stored in MongoDB when `MONGODB_URI` is set, so they
+Orders, order limits and the Paper/Live mode are stored in MongoDB when `MONGODB_URI` is set, so they
 survive restarts and redeploys on any host, with no Render disk needed. Without `MONGODB_URI` the app falls
 back to JSON files under `DATA_DIR`, which is fine locally but is wiped on hosts without a persistent disk.
 
@@ -261,8 +302,8 @@ Collections (database `MONGODB_DB`, default `trading_bot`): `orders` (one docume
    If you create the service by hand instead: Root Directory = this folder, Build Command
    `npm install --include=dev && npm run build`, Start Command `npm start`, Health Check `/healthz`,
    env `NODE_VERSION=22`.
-3. Fill in the prompted secrets: `MONGODB_URI`, `APP_PASSWORD`, `BINANCE_API_KEY`, `BINANCE_API_SECRET`, and
-   (only for live mode) `BINANCE_API_KEY_real`, `BINANCE_API_SECRET_real`.
+3. Fill in the prompted secrets: `MONGODB_URI`, `APP_PASSWORD`, and (only for live mode)
+   `BINANCE_API_KEY_real`, `BINANCE_API_SECRET_real`. Paper mode needs no Binance keys at all.
 4. Open the service URL and log in with `APP_USERNAME` / `APP_PASSWORD`.
 
 Things `render.yaml` sets on purpose:
@@ -278,12 +319,14 @@ Things `render.yaml` sets on purpose:
 
 Binance only accepts single IPs (not CIDR ranges) in an API key's whitelist. Render's shared outbound IPs
 are ranges, so live keys with trading enabled need a static IP: Render Dedicated IPs (Pro plan) or a small
-VPS. Testnet keys have no IP restriction.
+VPS. Paper mode makes no Binance account calls at all, so it has no IP restriction to worry about.
 
 ## What changed vs. the Python version
 
 - `python-binance` → a small signed REST client (`server/binance.js`). OCO orders use Binance's current
-  `POST /api/v3/orderList/oco` endpoint (verified on Testnet: create + cancel).
+  `POST /api/v3/orderList/oco` endpoint (verified end to end: create + cancel).
+- Testnet mode was replaced by **paper mode**: a fully local, simulated account (any starting capital, no
+  Binance keys) that fills orders against real live prices instead of a separate exchange (`server/paperBroker.js`).
 - Same routes under `/api/*`, same JSON shapes. CORS removed (same origin).
 - Fix: changing an entry price no longer re-buys if the old entry filled in the meantime.
 - Not ported: `backtest.py` (CLI script, not used by the dashboard). `SignalPanel`/`SignalLog` components

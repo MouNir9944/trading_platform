@@ -3,7 +3,6 @@ import test from "node:test";
 
 import { AMD_DEFAULTS, amdStages, buildContext, findAmd } from "../shared/analysis/index.js";
 import { STRATEGY_BY_ID } from "../shared/analysis/strategies.js";
-import { AMD_SETTINGS_DEFAULTS, buildAmdOverlays, visibleAmdSetups } from "../src/lib/amdOverlay.js";
 
 const bar = (i, open, high, low, close) => ({ time: 1_700_000_000 + i * 900, open, high, low, close, volume: 100 });
 
@@ -162,23 +161,4 @@ test("the strategy buys when a bullish gap forms and exits on a bearish one, wit
 
   const downCtx = buildContext(flip(up));
   assert.equal(strategy.evaluate(downCtx, 22).signal, "SELL");
-});
-
-test("the chart overlay hides failed setups by default and can show only completed ones", () => {
-  const candles = bullish(rally);
-  const [done] = findAmd(candles, null, { minRewardRisk: 0 });
-  const [lost] = findAmd(bullish(collapse), null, { minRewardRisk: 0 });
-  const s = { ...AMD_SETTINGS_DEFAULTS, enabled: true };
-  assert.equal(visibleAmdSetups([done, lost], s).length, 1);
-  assert.equal(visibleAmdSetups([done, lost], { ...s, showFailed: true }).length, 2);
-  assert.equal(visibleAmdSetups([done, lost], { ...s, showFailed: true, show: "completed" }).length, 1);
-  assert.equal(visibleAmdSetups([done, lost], { ...s, direction: "bear" }).length, 0);
-
-  const overlays = buildAmdOverlays([done], candles, s);
-  const labels = overlays.zones.map((z) => z.label).join("|");
-  assert.match(labels, /A · Accumulation/);
-  assert.match(labels, /F · FVG/);
-  assert.match(labels, /D · Distribution/);
-  assert.equal(overlays.labels[0].text, "M");
-  assert.ok(AMD_DEFAULTS.minRangeBars > 0);
 });

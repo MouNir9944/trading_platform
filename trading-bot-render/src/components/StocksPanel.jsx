@@ -12,7 +12,7 @@ const WIDE_SPREAD_PCT = 3; // quotes further apart than this mean the market is 
 
 /**
  * Binance Stocks: your holdings and a buy / sell ticket. This is a separate product from Spot with its own API,
- * available on the live account only, so everything here is real money and ignores the Testnet / Live switch.
+ * available on the live account only, so everything here is real money and ignores the Paper / Live switch.
  */
 export default function StocksPanel() {
   const [portfolio, setPortfolio] = useState(null);
@@ -133,7 +133,7 @@ export default function StocksPanel() {
           </div>
           <div className="stocks-head-actions">
             <button type="button" className="mini-button" onClick={() => window.open(`${window.location.pathname}#stocks`, "_blank", "noopener")} title="Open My stocks in its own browser tab or window">Open in new tab ↗</button>
-            <span className="testnet-badge live-badge">LIVE</span>
+            <span className="mode-badge live-badge">LIVE</span>
           </div>
         </div>
 

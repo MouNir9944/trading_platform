@@ -213,7 +213,7 @@ test("HTTP: /news and /news/calendar", async () => {
   const { state, fetchFn } = fakeWorld();
   const service = createNews({ fetchFn, feeds, now: () => state.clock });
   const store = new FileStore({ dir: fs.mkdtempSync(path.join(os.tmpdir(), "news-")) });
-  const spot = new OrderManager({ getClient: () => ({}), getMode: () => "testnet", getTradingFee: async () => ({}), store });
+  const spot = new OrderManager({ getClient: () => ({}), getMode: () => "paper", getTradingFee: async () => ({}), store });
   await spot.init();
   const { app } = createApp({ orderManager: spot, news: service });
   const server = app.listen(0);

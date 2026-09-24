@@ -80,7 +80,7 @@ async function makeManager(client, { settings = {}, limits = { max_open_orders: 
   const store = new FileStore({ dir });
   const manager = new FuturesManager({
     getClient: () => client,
-    getMode: () => "testnet",
+    getMode: () => "paper",
     getRiskSettings: () => normalizeSettings(settings),
     getLimits: () => limits,
     store,
@@ -114,7 +114,7 @@ test("long: limit entry, isolated margin and leverage, then stop-loss and take-p
 
   fillEntry(state, order);
   await sleep(80);
-  const protectedOrder = manager.listOrders("testnet")[0];
+  const protectedOrder = manager.listOrders("paper")[0];
   assert.equal(protectedOrder.status, "PROTECTED");
   const algos = [...state.algos.values()];
   assert.equal(algos.length, 2);
@@ -131,7 +131,7 @@ test("long: limit entry, isolated margin and leverage, then stop-loss and take-p
     { symbol: "BTCUSDT", side: "SELL", qty: "0.006", price: "51500", realizedPnl: "9", commission: "0.15", commissionAsset: "USDT", time: Date.now() + 5 },
   ];
   await sleep(120);
-  const closed = manager.listOrders("testnet")[0];
+  const closed = manager.listOrders("paper")[0];
   assert.equal(closed.status, "CLOSED");
   assert.equal(closed.message, "Take-profit triggered");
   assert.equal(closed.exit_price, 51500);
@@ -163,7 +163,7 @@ test("if the stop-loss cannot be placed, the filled position is closed instead o
   const order = await manager.createOrder(longTicket);
   fillEntry(state, order);
   await sleep(80);
-  const failed = manager.listOrders("testnet")[0];
+  const failed = manager.listOrders("paper")[0];
   assert.equal(failed.status, "ERROR");
   assert.match(failed.message, /Stop-loss could not be placed/);
   assert.match(failed.message, /closed at market/);
@@ -180,18 +180,18 @@ test("a take-profit that fails is retried and a stop-loss cancelled by hand is p
   const order = await manager.createOrder(longTicket);
   fillEntry(state, order);
   await sleep(60);
-  let current = manager.listOrders("testnet")[0];
+  let current = manager.listOrders("paper")[0];
   assert.equal(current.status, "PROTECTED");
   assert.equal(current.tp_algo_id, null);
 
   state.failTarget = false;
   await sleep(80);
-  current = manager.listOrders("testnet")[0];
+  current = manager.listOrders("paper")[0];
   assert.ok(current.tp_algo_id, "the missing take-profit was placed");
 
   state.algos.get(current.sl_algo_id).algoStatus = "CANCELED"; // someone cancels the stop on Binance
   await sleep(80);
-  const replaced = manager.listOrders("testnet")[0];
+  const replaced = manager.listOrders("paper")[0];
   assert.notEqual(replaced.sl_algo_id, current.sl_algo_id);
   assert.equal(state.algos.get(replaced.sl_algo_id).algoStatus, "NEW");
   manager.stop();
@@ -206,7 +206,7 @@ test("a position closed outside the app (or liquidated) closes the record", asyn
   state.position = 0;
   state.trades = [{ symbol: "BTCUSDT", side: "SELL", qty: "0.006", price: "49000", realizedPnl: "-6", commission: "0.15", commissionAsset: "USDT", time: Date.now() + 5 }];
   await sleep(120);
-  const closed = manager.listOrders("testnet")[0];
+  const closed = manager.listOrders("paper")[0];
   assert.equal(closed.status, "CLOSED");
   assert.match(closed.message, /closed on Binance/);
   assert.equal(closed.realized_profit_usdt, -6.15);
@@ -290,14 +290,14 @@ test("futures orders are stored with the spot ones but each manager only loads i
   const order = await manager.createOrder(longTicket);
   await manager.flush();
 
-  const spot = new OrderManager({ getClient: () => ({}), getMode: () => "testnet", getTradingFee: async () => ({}), store });
+  const spot = new OrderManager({ getClient: () => ({}), getMode: () => "paper", getTradingFee: async () => ({}), store });
   await spot.init();
-  assert.equal(spot.listOrders("testnet").length, 0, "the spot manager ignores futures orders");
+  assert.equal(spot.listOrders("paper").length, 0, "the spot manager ignores futures orders");
 
-  const restarted = new FuturesManager({ getClient: () => client, getMode: () => "testnet", getRiskSettings: () => ({ ...RISK_DEFAULTS }), getLimits: () => ({ max_open_orders: 3, max_daily_orders: 9 }), store, pollMs: 60_000 });
+  const restarted = new FuturesManager({ getClient: () => client, getMode: () => "paper", getRiskSettings: () => ({ ...RISK_DEFAULTS }), getLimits: () => ({ max_open_orders: 3, max_daily_orders: 9 }), store, pollMs: 60_000 });
   await restarted.init();
-  assert.equal(restarted.listOrders("testnet")[0].id, order.id);
-  assert.equal(restarted.listOrders("testnet")[0].side, "LONG");
+  assert.equal(restarted.listOrders("paper")[0].id, order.id);
+  assert.equal(restarted.listOrders("paper")[0].side, "LONG");
 });
 
 test("helpers: symbol info, positions and trade summary", () => {
@@ -359,21 +359,21 @@ test("risk: futures setup sizes a short on the margin, with the stop above and t
 
 // ---- the client and the HTTP layer ----
 
-test("futures client signs requests for the demo host and uses the algo endpoint for stop and target", async () => {
-  const saved = { fetch: globalThis.fetch, key: process.env.BINANCE_FUTURES_API_KEY, secret: process.env.BINANCE_FUTURES_API_SECRET };
-  process.env.BINANCE_FUTURES_API_KEY = "test-key";
-  process.env.BINANCE_FUTURES_API_SECRET = "test-secret";
+test("futures client signs requests for the live host and uses the algo endpoint for stop and target", async () => {
+  const saved = { fetch: globalThis.fetch, key: process.env.BINANCE_FUTURES_API_KEY_real, secret: process.env.BINANCE_FUTURES_API_SECRET_real };
+  process.env.BINANCE_FUTURES_API_KEY_real = "test-key";
+  process.env.BINANCE_FUTURES_API_SECRET_real = "test-secret";
   const seen = [];
   globalThis.fetch = async (url, init) => {
     seen.push({ url: String(url), method: init.method, headers: init.headers });
     return new Response(JSON.stringify(String(url).includes("/time") ? { serverTime: Date.now() } : { algoId: 1 }), { status: 200 });
   };
   try {
-    const client = new FuturesTradingClient("testnet");
+    const client = new FuturesTradingClient("live");
     await client.createCloseTrigger({ symbol: "BTCUSDT", side: "SELL", type: "STOP_MARKET", triggerPrice: "49500" });
     const call = seen.find((c) => c.url.includes("/algoOrder"));
     const url = new URL(call.url);
-    assert.equal(url.origin, "https://demo-fapi.binance.com");
+    assert.equal(url.origin, "https://fapi.binance.com");
     assert.equal(url.pathname, "/fapi/v1/algoOrder");
     assert.equal(call.method, "POST");
     assert.equal(call.headers["X-MBX-APIKEY"], "test-key");
@@ -384,11 +384,11 @@ test("futures client signs requests for the demo host and uses the algo endpoint
     assert.match(url.searchParams.get("signature"), /^[0-9a-f]{64}$/);
     assert.ok(seen.some((c) => c.url.includes("/fapi/v1/time")), "time is synced on the futures host");
 
-    delete process.env.BINANCE_FUTURES_API_KEY;
-    await assert.rejects(new FuturesTradingClient("testnet").getBalance(), /Missing Binance futures testnet credentials/);
+    delete process.env.BINANCE_FUTURES_API_KEY_real;
+    await assert.rejects(new FuturesTradingClient("live").getBalance(), /Missing Binance live futures credentials/);
   } finally {
     globalThis.fetch = saved.fetch;
-    for (const [name, value] of [["BINANCE_FUTURES_API_KEY", saved.key], ["BINANCE_FUTURES_API_SECRET", saved.secret]]) {
+    for (const [name, value] of [["BINANCE_FUTURES_API_KEY_real", saved.key], ["BINANCE_FUTURES_API_SECRET_real", saved.secret]]) {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
     }
@@ -398,7 +398,7 @@ test("futures client signs requests for the demo host and uses the algo endpoint
 test("HTTP: futures routes validate input, and report when futures trading is unavailable", async () => {
   const { client } = fakeFutures();
   const { manager: futures, store } = await makeManager(client);
-  const spot = new OrderManager({ getClient: () => ({}), getMode: () => "testnet", getTradingFee: async () => ({}), store });
+  const spot = new OrderManager({ getClient: () => ({}), getMode: () => "paper", getTradingFee: async () => ({}), store });
   await spot.init();
 
   const { app } = createApp({ orderManager: spot, futuresManager: futures });
@@ -414,9 +414,9 @@ test("HTTP: futures routes validate input, and report when futures trading is un
     assert.equal(created.status, 200);
     const body = await created.json();
     assert.equal(body.side, "LONG");
-    const list = await (await fetch(`${base}/futures/orders?mode=testnet`)).json();
+    const list = await (await fetch(`${base}/futures/orders?mode=paper`)).json();
     assert.equal(list.orders.length, 1);
-    assert.equal((await fetch(`${base}/orders?mode=testnet`).then((r) => r.json())).orders.length, 0, "spot list is separate");
+    assert.equal((await fetch(`${base}/orders?mode=paper`).then((r) => r.json())).orders.length, 0, "spot list is separate");
     const cancelled = await (await fetch(`${base}/futures/orders/${body.id}`, { method: "DELETE" })).json();
     assert.equal(cancelled.status, "CANCELLED");
   } finally {

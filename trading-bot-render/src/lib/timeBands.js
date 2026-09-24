@@ -12,6 +12,8 @@ export const WEEKDAY_COLORS = ["#5b9cff", "#2dd4bf", "#a78bfa", "#38bdf8", "#f47
 
 const DAY_TINT = 0.075;
 const STRIP_HEIGHT = 4;
+const PEAK_COLOR = "#f5c518";
+const PEAK_TINT = 0.06;
 
 function withAlpha(hex, alpha) {
   const n = parseInt(hex.slice(1), 16);
@@ -24,8 +26,8 @@ class BandsRenderer {
   }
 
   draw(target) {
-    const { chart, days, sessions, times, showDays, showSessions } = this.source;
-    if (!chart || (!showDays && !showSessions)) return;
+    const { chart, days, sessions, peak, times, showDays, showSessions, showPeak } = this.source;
+    if (!chart || (!showDays && !showSessions && !showPeak)) return;
     const scale = chart.timeScale();
 
     target.useMediaCoordinateSpace(({ context: ctx, mediaSize }) => {
@@ -71,6 +73,15 @@ class BandsRenderer {
           ctx.fillRect(span.x1, 0, span.x2 - span.x1, STRIP_HEIGHT);
         });
       }
+
+      if (showPeak) {
+        peak.forEach((segment, i) => {
+          const span = spanOf(segment.startIndex, segment.endIndex, i === peak.length - 1);
+          if (!span) return;
+          ctx.fillStyle = withAlpha(PEAK_COLOR, PEAK_TINT);
+          ctx.fillRect(span.x1, 0, span.x2 - span.x1, height);
+        });
+      }
     });
   }
 }
@@ -95,9 +106,11 @@ export class TimeBandsPrimitive {
     this.requestUpdate = null;
     this.days = [];
     this.sessions = [];
+    this.peak = [];
     this.times = [];
     this.showDays = true;
     this.showSessions = false;
+    this.showPeak = false;
     this.views = [new BandsPaneView(this)];
   }
 
@@ -115,12 +128,14 @@ export class TimeBandsPrimitive {
     return this.views;
   }
 
-  set({ days, sessions, times, showDays, showSessions }) {
+  set({ days, sessions, peak, times, showDays, showSessions, showPeak }) {
     this.days = days;
     this.times = times;
     this.sessions = sessions;
+    this.peak = peak;
     this.showDays = showDays;
     this.showSessions = showSessions;
+    this.showPeak = showPeak;
     this.requestUpdate?.();
   }
 }

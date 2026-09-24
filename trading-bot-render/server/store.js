@@ -4,7 +4,7 @@
  *  - FileStore:  JSON files in DATA_DIR; the local-dev fallback. Ephemeral on hosts without a disk.
  *
  * Interface: init(), loadOrders(), saveOrder(order), removeOrders(ids), getSetting(key), setSetting(key, value), close().
- * Settings used: "limits" ({max_open_orders, max_daily_orders}) and "account_mode" ("testnet" | "live").
+ * Settings used: "limits" ({max_open_orders, max_daily_orders}) and "account_mode" ("paper" | "live").
  */
 import fs from "node:fs";
 import path from "node:path";

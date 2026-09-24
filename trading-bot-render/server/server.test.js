@@ -86,8 +86,8 @@ function fakeExchange() {
 async function makeManager(client, { store, dir = fs.mkdtempSync(path.join(os.tmpdir(), "orders-")) } = {}) {
   const manager = new OrderManager({
     getClient: () => client,
-    getMode: () => "testnet",
-    getTradingFee: async () => { throw new Error("no fee endpoint on testnet"); },
+    getMode: () => "paper",
+    getTradingFee: async () => { throw new Error("no fee endpoint in paper mode"); },
     store: store ?? new FileStore({ dir }),
     pollMs: 10,
   });
@@ -113,7 +113,7 @@ test("filled entry gets an OCO, then closes with realized profit when the target
   // Entry fills -> monitor places the OCO.
   Object.assign(placed, { status: "FILLED", executedQty: "399.6" });
   await sleep(80);
-  const protectedOrder = manager.listOrders("testnet")[0];
+  const protectedOrder = manager.listOrders("paper")[0];
   assert.equal(protectedOrder.status, "PROTECTED");
   assert.equal(state.ocoCalls.length, 1);
   assert.deepEqual(
@@ -125,7 +125,7 @@ test("filled entry gets an OCO, then closes with realized profit when the target
   const tp = state.orders.get(protectedOrder.exit_order_ids[0]);
   Object.assign(tp, { status: "FILLED", executedQty: "399.6", cummulativeQuoteQty: String(399.6 * 0.27) });
   await sleep(80);
-  const closed = manager.listOrders("testnet")[0];
+  const closed = manager.listOrders("paper")[0];
   assert.equal(closed.status, "CLOSED");
   assert.ok(closed.realized_profit_usdt > 0);
   assert.ok(Date.parse(closed.closed_at) > Date.parse(closed.created_at) - 1, "close time is recorded for the risk rules");
@@ -187,7 +187,7 @@ test("HTTP layer: basic auth, health check, validation and error shape", async (
     assert.equal((await fetch(`${base}/api/orders`)).status, 401);
     assert.equal((await fetch(`${base}/api/orders`, { headers: { Authorization: `Basic ${Buffer.from("admin:nope").toString("base64")}` } })).status, 401);
 
-    const list = await fetch(`${base}/api/orders?mode=testnet`, { headers: authed });
+    const list = await fetch(`${base}/api/orders?mode=paper`, { headers: authed });
     assert.equal(list.status, 200);
     assert.deepEqual((await list.json()).orders, []);
 
@@ -215,7 +215,7 @@ test("a Binance IP ban pauses requests instead of extending the ban", async () =
     return new Response(JSON.stringify({ code: -1003, msg: `Way too much request weight used; IP banned until ${until}.` }), { status: 418 });
   };
   try {
-    const client = new BinanceClient("testnet");
+    const client = new BinanceClient("live");
     await assert.rejects(client.getSymbolTicker("XLMUSDT"), /code=-1003/);
     await assert.rejects(client.getSymbolTicker("XLMUSDT"), /requests paused until/);
     await assert.rejects(client.getKlines("XLMUSDT", "1m", 1), /requests paused until/);
@@ -254,7 +254,7 @@ async function storeContract(store) {
   assert.deepEqual(await store.loadOrders(), []);
   assert.equal(await store.getSetting("account_mode"), null);
 
-  const a = { id: "a1", symbol: "XLMUSDT", status: "WAITING_ENTRY", account_mode: "testnet", created_at: "2026-09-19T10:00:00.000Z" };
+  const a = { id: "a1", symbol: "XLMUSDT", status: "WAITING_ENTRY", account_mode: "paper", created_at: "2026-09-19T10:00:00.000Z" };
   const b = { id: "b2", symbol: "DASHUSDT", status: "CLOSED", account_mode: "live", created_at: "2026-09-18T10:00:00.000Z", realized_profit_usdt: 1.5 };
   await store.saveOrder(a);
   await store.saveOrder(b);
@@ -356,14 +356,14 @@ test("risk rules: kill switch, daily loss halt and disabling", async () => {
   assert.equal((await manager.createOrder(ticket)).status, "WAITING_ENTRY");
 
   // A 40 USDT loss today on 1000 USDT capital (limit 3% = 30)
-  manager.orders.loss1 = { id: "loss1", symbol: "XLMUSDT", status: "CLOSED", account_mode: "testnet", realized_profit_usdt: -40, created_at: new Date().toISOString(), closed_at: new Date().toISOString(), capital_usdt: 100 };
+  manager.orders.loss1 = { id: "loss1", symbol: "XLMUSDT", status: "CLOSED", account_mode: "paper", realized_profit_usdt: -40, created_at: new Date().toISOString(), closed_at: new Date().toISOString(), capital_usdt: 100 };
   await assert.rejects(manager.createOrder(ticket), /Daily loss limit reached: -40 USDT today/);
-  assert.equal(manager.getRiskState("testnet", 1000).status, "halted");
+  assert.equal(manager.getRiskState("paper", 1000).status, "halted");
 
   // Another account's history does not matter
   manager.orders.loss1.account_mode = "live";
   assert.equal((await manager.createOrder(ticket)).status, "WAITING_ENTRY");
-  manager.orders.loss1.account_mode = "testnet";
+  manager.orders.loss1.account_mode = "paper";
 
   // Turning the limits off lifts the halt (the kill switch would still apply)
   manager.setRiskSettings({ enabled: false });

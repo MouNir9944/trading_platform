@@ -6,14 +6,16 @@ import { basicAuth } from "./auth.js";
 import * as binance from "./binance.js";
 import { assertMode, ROOT_DIR } from "./config.js";
 import { getSymbolInfo } from "./orders.js";
-import { buildEquityOrder, getPortfolio, getStocksClient } from "./stocks.js";
+import { buildEquityOrder, fetchAllOrders, fetchAllTrades, getPortfolio, getStocksClient, realizedTrades } from "./stocks.js";
 import { createStockData } from "./stockData.js";
 import { createNews } from "./news.js";
-import { INTERVAL_MS } from "./autoAmd.js";
+import { INTERVAL_MS } from "./autoTrader.js";
 import { fetchHistory } from "./candles.js";
 import { toCandles } from "../shared/analysis/index.js";
-import { backtestAmd, sweepAmd } from "../shared/analysis/amdTrade.js";
+import { STRATEGIES, STRATEGY_BY_ID, defaultParams, resolveParams, strategyInfo } from "../shared/strategies/index.js";
+import { backtestStrategy, sweepTrades } from "../shared/strategies/trade.js";
 import { MIN_SCORED_VOLUME, buildOverview, createMarketCaps } from "./market.js";
+import { paperSummary, resetPaperBroker, setPaperFuturesBalance, setPaperSpotBalance } from "./paperBroker.js";
 import { categorizeFutures, categorizeSpot, equityBasesFrom } from "./categories.js";
 import { computeCapital, computeRiskState, tradeStats } from "../shared/risk.js";
 import {
@@ -59,7 +61,7 @@ const marketOf = (req) => (req.query.market === "futures" ? "futures" : "spot");
 
 /**
  * Which account's market data a request reads. `source=live` asks for the live public data whatever the account
- * mode is (the multi-chart screen uses it: Testnet lists only a few pairs and its prices are synthetic).
+ * mode is (paper mode already reads real live data, so this mainly matters if `live` credentials are unset).
  */
 const dataMode = (req) => (req.query.source === "live" ? "live" : binance.getMode());
 
@@ -76,7 +78,7 @@ function parseMode(value) {
   return assertMode(mode);
 }
 
-export function createApp({ orderManager, futuresManager = null, stocksClient = null, stockData = null, news = null, autoAmd = null, notifier = null, amdHistory = null, auth, storage = "file", marketCaps = createMarketCaps() }) {
+export function createApp({ orderManager, futuresManager = null, stocksClient = null, stockData = null, news = null, bots = null, notifier = null, amdHistory = null, auth, storage = "file", marketCaps = createMarketCaps() }) {
   const app = express();
   app.disable("x-powered-by");
   app.set("trust proxy", 1); // Render terminates TLS in front of the service
@@ -186,7 +188,7 @@ export function createApp({ orderManager, futuresManager = null, stocksClient = 
 
   /**
    * Every tradable pair with 24h stats, market cap and a trade-worthiness score. Ranking uses LIVE public
-   * Binance data even in Testnet mode (Testnet volumes are synthetic), limited to pairs Testnet supports.
+   * Binance data (paper mode's own market data already comes from the same source).
    */
   api.get("/market/overview", handle(500, async (req) => {
     const quote = String(req.query.quote || "USDT").toUpperCase();
@@ -292,32 +294,74 @@ export function createApp({ orderManager, futuresManager = null, stocksClient = 
 
   api.get("/account/mode", handle(500, () => {
     const mode = binance.getMode();
-    return { mode, testnet: binance.isTestnet(mode) };
+    return { mode, paper: binance.isPaper(mode) };
   }));
 
   api.post("/account/mode", handle(400, (req) => {
     const mode = binance.setMode(String(req.body?.mode ?? "").toLowerCase());
-    return { mode, testnet: binance.isTestnet(mode) };
+    return { mode, paper: binance.isPaper(mode) };
   }));
 
-  // ---- AMD bot, its backtest and the notification center ----
-  const bot = () => {
-    if (!autoAmd) throw Object.assign(new Error("The AMD bot is not available on this server"), { httpStatus: 503 });
-    return autoAmd;
+  // ---- paper trading: a local, simulated account with no real money and no Binance keys ----
+  api.get("/account/paper-balance", handle(500, () => paperSummary()));
+
+  api.post("/account/paper-balance", handle(400, (req) => {
+    const market = req.body?.market === "futures" ? "futures" : "spot";
+    const amount = Number(req.body?.amount);
+    if (market === "futures") setPaperFuturesBalance(amount);
+    else setPaperSpotBalance(String(req.body?.asset ?? "USDT").toUpperCase(), amount);
+    return paperSummary();
+  }));
+
+  api.post("/account/paper-reset", handle(400, (req) => {
+    const spotUsdt = req.body?.spotUsdt != null ? Number(req.body.spotUsdt) : undefined;
+    const futuresUsdt = req.body?.futuresUsdt != null ? Number(req.body.futuresUsdt) : undefined;
+    resetPaperBroker(spotUsdt, futuresUsdt);
+    // The simulated exchange was just wiped, so any order still tracked here (even an active one) would
+    // otherwise be orphaned - its monitor polling an order the simulated exchange no longer knows about.
+    manager.clearAccount("paper");
+    futuresManager?.clearAccount("paper");
+    return paperSummary();
+  }));
+
+  // ---- strategies: their bots, backtests and the notification center ----
+  const strategyOf = (req) => {
+    const strategy = STRATEGY_BY_ID[req.params.id];
+    if (!strategy) throw Object.assign(new Error(`Unknown strategy: ${req.params.id}`), { httpStatus: 404 });
+    return strategy;
+  };
+  const botOf = (req) => {
+    const strategy = strategyOf(req);
+    const bot = bots?.get(strategy.id);
+    if (!bot) throw Object.assign(new Error("Automatic trading is not available on this server"), { httpStatus: 503 });
+    return bot;
   };
   const hub = () => {
     if (!notifier) throw Object.assign(new Error("Notifications are not available on this server"), { httpStatus: 503 });
     return notifier;
   };
 
-  api.get("/amd/config", handle(500, () => bot().getConfig()));
-  api.put("/amd/config", handle(400, async (req) => {
+  api.get("/strategies", handle(500, () => ({
+    strategies: STRATEGIES.map((s) => {
+      const bot = bots?.get(s.id);
+      const st = bot?.status();
+      return { ...strategyInfo(s), defaults: defaultParams(s), bot: st ? { watching: st.watching, ordering: st.ordering, pairs: st.pairs.length, pending: st.pending.length } : null };
+    }),
+    channels: notifier?.channels() ?? null,
+  })));
+
+  api.get("/strategies/:id/bot", handle(500, (req) => ({ config: botOf(req).getConfig(), status: botOf(req).status() })));
+  api.put("/strategies/:id/bot", handle(400, async (req) => {
     const { confirm, ...patch } = req.body ?? {};
-    return { config: await bot().setConfig(patch, { confirm }), status: bot().status() };
+    const bot = botOf(req);
+    return { config: await bot.setConfig(patch, { confirm }), status: bot.status() };
   }));
-  api.get("/amd/status", handle(500, () => ({ config: bot().getConfig(), status: bot().status(), channels: hub().channels() })));
-  api.post("/amd/scan", handle(500, async () => ({ status: await bot().tick({ force: true }) })));
-  api.get("/amd/log", handle(500, (req) => hub().list({ source: "amd", limit: Math.min(200, Math.max(1, Number(req.query.limit) || 50)) })));
+  api.post("/strategies/:id/bot/scan", handle(500, async (req) => ({ status: await botOf(req).tick({ force: true }) })));
+  api.get("/strategies/:id/log", handle(500, (req) => {
+    const strategy = strategyOf(req);
+    return hub().list({ source: "bot", strategy: strategy.id, limit: Math.min(200, Math.max(1, Number(req.query.limit) || 50)) });
+  }));
+  api.get("/bots/log", handle(500, (req) => hub().list({ source: "bot", limit: Math.min(200, Math.max(1, Number(req.query.limit) || 50)) })));
 
   api.get("/notifications", handle(500, (req) => ({
     ...hub().list({ since: Number(req.query.since) || 0, limit: Math.min(200, Math.max(1, Number(req.query.limit) || 50)) }),
@@ -326,13 +370,14 @@ export function createApp({ orderManager, futuresManager = null, stocksClient = 
   api.post("/notifications/read", handle(400, (req) => hub().markRead(Array.isArray(req.body?.ids) ? req.body.ids.map(String) : null)));
   api.post("/notifications/test", handle(500, () => hub().test()));
 
-  // Replays the bot's exact orders over real history (live public data, whatever the account mode is).
+  // History for backtests: live public data, whatever the account mode is.
   const loadHistory = amdHistory ?? (async (market, symbol, interval, total) => {
     const client = binance.getFuturesClient && market === "futures" ? binance.getFuturesClient() : binance.getClient("live");
-    return toCandles(await cache.get(`amd-history:${market}:${symbol}:${interval}:${total}`, 10 * 60_000, () => fetchHistory((s, i, l, e) => client.getKlines(s, i, l, e), symbol, interval, total)));
+    return toCandles(await cache.get(`bt-history:${market}:${symbol}:${interval}:${total}`, 10 * 60_000, () => fetchHistory((s, i, l, e) => client.getKlines(s, i, l, e), symbol, interval, total)));
   });
-  api.post("/amd/backtest", handle(400, async (req) => {
-    const b = req.body ?? {};
+  const num = (v, d, lo, hi) => { const n = Number(v ?? d); if (!Number.isFinite(n) || n < lo || n > hi) throw badRequest(`value must be between ${lo} and ${hi}`); return n; };
+  /** The common part of a backtest request: what to test on. */
+  async function readTestRequest(b) {
     const market = b.market === "spot" ? "spot" : "futures";
     const symbols = [...new Set((Array.isArray(b.symbols) ? b.symbols : []).map((x) => String(x).trim().toUpperCase()))];
     if (!symbols.length || symbols.length > 12) throw badRequest("choose between 1 and 12 pairs");
@@ -340,11 +385,10 @@ export function createApp({ orderManager, futuresManager = null, stocksClient = 
     const interval = String(b.interval ?? "15m");
     if (!INTERVAL_MS[interval]) throw badRequest(`timeframe must be one of ${Object.keys(INTERVAL_MS).join(", ")}`);
     const total = Math.min(5000, Math.max(300, Math.floor(Number(b.candles) || 3000)));
-    const num = (v, d, lo, hi) => { const n = Number(v ?? d); if (!Number.isFinite(n) || n < lo || n > hi) throw badRequest(`value must be between ${lo} and ${hi}`); return n; };
-    const engine = { minRangeBars: num(b.engine?.minRangeBars, 10, 4, 40), maxRangeAtr: num(b.engine?.maxRangeAtr, 3.5, 1.5, 6), minRewardRisk: num(b.engine?.minRewardRisk, 1, 0, 5) };
+    const modeOf = (v) => (v === "fvg-retest" ? "retest" : v);
     const trade = {
-      entryMode: b.trade?.entryMode === "fvg-retest" ? "fvg-retest" : "limit-close",
-      targetMode: b.trade?.targetMode === "r" ? "r" : "range",
+      entryMode: modeOf(b.trade?.entryMode) === "retest" ? "retest" : "limit-close",
+      targetMode: b.trade?.targetMode === "r" ? "r" : "own",
       targetR: num(b.trade?.targetR, 2, 1, 5),
       expiryCandles: Math.round(num(b.trade?.expiryCandles, 3, 1, 10)),
       feePercent: num(b.trade?.feePercent, market === "spot" ? 0.1 : 0.05, 0, 1),
@@ -353,11 +397,9 @@ export function createApp({ orderManager, futuresManager = null, stocksClient = 
       shorts: market === "futures" && b.trade?.shorts !== false,
     };
     const summary = { startEquity: 1000, riskPerTradePct: num(b.riskPerTradePct, 1, 0.1, 10) };
-
     const datasets = [];
     for (let i = 0; i < symbols.length; i += 4) {
-      const chunk = symbols.slice(i, i + 4);
-      const loaded = await Promise.all(chunk.map(async (symbol) => {
+      const loaded = await Promise.all(symbols.slice(i, i + 4).map(async (symbol) => {
         try {
           return { symbol, candles: await loadHistory(market, symbol, interval, total) };
         } catch (err) {
@@ -366,12 +408,39 @@ export function createApp({ orderManager, futuresManager = null, stocksClient = 
       }));
       datasets.push(...loaded);
     }
-    const result = backtestAmd(datasets, { engine, trade, summary });
-    result.perSymbol = result.perSymbol.map((p) => ({ ...p, error: datasets.find((d) => d.symbol === p.symbol)?.error ?? p.error, stats: { ...p.stats, curve: undefined } }));
+    return { market, interval, total, trade, summary, datasets };
+  }
+  const withErrors = (result, datasets) => ({
+    ...result,
+    perSymbol: result.perSymbol.map((p) => ({ ...p, error: datasets.find((d) => d.symbol === p.symbol)?.error ?? p.error, stats: { ...p.stats, curve: undefined } })),
+  });
+
+  api.post("/strategies/:id/backtest", handle(400, async (req) => {
+    const strategy = strategyOf(req);
+    const b = req.body ?? {};
+    const params = resolveParams(strategy, b.params);
+    const { market, interval, total, trade, summary, datasets } = await readTestRequest(b);
+    if (strategy.supportsRetest !== true && trade.entryMode === "retest") throw badRequest(`${strategy.name} has no retest entry`);
+    const result = withErrors(backtestStrategy(datasets, { strategy, params, trade, summary }), datasets);
     result.trades = result.trades.slice(0, 300);
-    const out = { market, interval, candlesRequested: total, ...result };
-    if (b.sweep) out.sweep = sweepAmd(datasets, { engine, trade, summary }).map((row) => ({ ...row, stats: { ...row.stats, curve: undefined } }));
+    const out = { strategy: strategy.id, market, interval, candlesRequested: total, ...result };
+    if (b.sweep) out.sweep = sweepTrades(datasets, { strategy, params, trade, summary }).map((row) => ({ ...row, stats: { ...row.stats, curve: undefined } }));
     return out;
+  }));
+
+  // Every strategy on the same data with its own default settings: a leaderboard.
+  api.post("/strategies/compare", handle(400, async (req) => {
+    const b = req.body ?? {};
+    const { market, interval, total, trade, summary, datasets } = await readTestRequest(b);
+    const rows = STRATEGIES.map((strategy) => {
+      const t = { ...trade, entryMode: "limit-close" }; // a common footing: every strategy enters at its signal close
+      const result = backtestStrategy(datasets, { strategy, params: defaultParams(strategy), trade: t, summary });
+      return {
+        id: strategy.id, name: strategy.name, summary: strategy.summary, directions: strategy.directions,
+        stats: { ...result.combined, curve: undefined }, verdict: result.verdict, signals: result.counts.signals, avgPlannedRewardRisk: result.counts.avgPlannedRewardRisk,
+      };
+    });
+    return { market, interval, candlesRequested: total, pairs: datasets.map((d) => ({ symbol: d.symbol, candles: d.candles.length, error: d.error ?? null })), rows, options: { trade: { ...trade, entryMode: "limit-close" }, summary } };
   }));
 
   // ---- economic news: public feeds of central banks and business publishers, and this week's calendar ----
@@ -398,6 +467,19 @@ export function createApp({ orderManager, futuresManager = null, stocksClient = 
       try { h.name = (await yahoo().daily(h.symbol)).name; } catch { /* the name is a nicety */ }
     }));
     return portfolio;
+  })));
+
+  // Realized profit/loss events (closed sells), for the Performance tab. The client buckets these into days and
+  // months in its own time zone, so the (expensive, paginated) history fetch stays cached across that.
+  api.get("/stocks/performance", handle(500, () => cache.get("stocks:performance", 60_000, async () => {
+    const client = stocks();
+    const trades = await fetchAllTrades(client);
+    let orders = [];
+    try {
+      orders = await fetchAllOrders(client);
+    } catch { /* without fees the realized amounts are a little high, but still close */ }
+    const events = realizedTrades(trades, orders).sort((a, b) => b.time - a.time);
+    return { events: events.slice(0, 2000), tradeCount: trades.length };
   })));
 
   // Every ticker Binance Stocks lists (about 7,900), keyed by symbol.
@@ -495,7 +577,7 @@ export function createApp({ orderManager, futuresManager = null, stocksClient = 
 
   api.get("/futures/orders", handle(400, (req) => {
     const mode = parseMode(req.query.mode);
-    return { orders: futures().listOrders(mode), mode, testnet: binance.isTestnet(mode) };
+    return { orders: futures().listOrders(mode), mode, paper: binance.isPaper(mode) };
   }));
 
   api.post("/futures/orders", handle(400, (req) => {
@@ -527,7 +609,7 @@ export function createApp({ orderManager, futuresManager = null, stocksClient = 
 
   api.get("/orders", handle(400, (req) => {
     const mode = parseMode(req.query.mode);
-    return { orders: manager.listOrders(mode), mode, testnet: binance.isTestnet(mode) };
+    return { orders: manager.listOrders(mode), mode, paper: binance.isPaper(mode) };
   }));
 
   api.get("/orders/binance-open", handle(500, async (req) => {
@@ -539,7 +621,7 @@ export function createApp({ orderManager, futuresManager = null, stocksClient = 
   }));
 
   api.delete("/orders/binance-open/:symbol/:orderId", handle(400, async (req) => {
-    const mode = parseMode(req.query.mode ?? "testnet");
+    const mode = parseMode(req.query.mode ?? "paper");
     const order = await binance.getClient(mode).cancelOrder(req.params.symbol.toUpperCase(), req.params.orderId);
     return { cancelled: true, order };
   }));

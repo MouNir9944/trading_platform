@@ -4,7 +4,7 @@ import FuturesTicket from "./FuturesTicket.jsx";
 import RiskPanel from "./RiskPanel.jsx";
 import { usePersistentState, oneOf, isText } from "../lib/persist.js";
 import { checkOrder, riskSetup } from "../../shared/risk.js";
-import { cancelBinanceOpenOrder, cancelFuturesOrder, cancelOrder, clearFuturesOrderHistory, clearOrderHistory, deleteFuturesOrderHistory, createConditionalOrder, deleteOrderHistory, getBalance, getOrderLimits, getSymbolInfo, getTradingFee, modifyEntryPrice, setOrderLimits } from "../api.js";
+import { cancelBinanceOpenOrder, cancelFuturesOrder, cancelOrder, clearFuturesOrderHistory, clearOrderHistory, deleteFuturesOrderHistory, createConditionalOrder, deleteOrderHistory, getBalance, getOrderLimits, getSymbolInfo, getTradingFee, modifyEntryPrice, setOrderLimits, setPaperBalance } from "../api.js";
 
 export default function AutoOrderPanel({
   currentPrice,
@@ -32,6 +32,7 @@ export default function AutoOrderPanel({
   loadHourly,
   timeZone = "UTC",
   interval,
+  onDraftChange = () => {},
 }) {
   const [feePercent, setFeePercent] = useState(0.1);
   const [entryPrice, setEntryPrice] = useState("");
@@ -41,6 +42,8 @@ export default function AutoOrderPanel({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [refreshingBalance, setRefreshingBalance] = useState(false);
+  const [editingBalance, setEditingBalance] = useState(false);
+  const [balanceDraft, setBalanceDraft] = useState("");
   const [maxOpenOrders, setMaxOpenOrders] = useState(1);
   const [maxDailyOrders, setMaxDailyOrders] = useState(5);
   const [adjustingOrderId, setAdjustingOrderId] = useState(null);
@@ -157,6 +160,15 @@ export default function AutoOrderPanel({
     setEntryPrice(selectedEntryPrice.toFixed(8));
   }, [selectedEntryPrice]);
 
+  // Report the ticket being set up, so the chart can draw its entry/stop/target as draggable lines. Dragging one
+  // only ever feeds back into these same fields (below), so it can never place an order the risk rules would refuse.
+  useEffect(() => {
+    if (tab !== "trade" || futuresMarket || !tradeReady) { onDraftChange(null); return; }
+    onDraftChange({ symbol, side: "long", entry, stopLoss: stopPrice, takeProfit: targetPrice, quantity: estimatedQuantity, feePercent, blocked: blockedByRisk });
+    return () => onDraftChange(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab, futuresMarket, symbol, entry, stopPrice, targetPrice, tradeReady, estimatedQuantity, feePercent, blockedByRisk]);
+
   useEffect(() => {
     if (currentPrice == null || entryPrice) return;
     setEntryPrice(currentPrice.toFixed(6));
@@ -195,6 +207,22 @@ export default function AutoOrderPanel({
       setError(err.message);
     } finally {
       setRefreshingBalance(false);
+    }
+  }
+
+  async function saveBalance(event) {
+    event.preventDefault();
+    const amount = Number(balanceDraft);
+    if (!Number.isFinite(amount) || amount < 0) {
+      setError("Enter a balance of zero or more");
+      return;
+    }
+    try {
+      await setPaperBalance("spot", amount, quoteAsset);
+      setEditingBalance(false);
+      await refreshBalance();
+    } catch (err) {
+      setError(err.message);
     }
   }
 
@@ -279,7 +307,7 @@ export default function AutoOrderPanel({
           <p className="panel-title">Automatic entry</p>
           <p className="panel-subtitle">{futuresMarket ? "Futures: limit entry, then Binance stop-loss / take-profit" : "Limit buy, then Binance OCO for SL / TP"}</p>
         </div>
-        <span className={`testnet-badge ${mode === "live" ? "live-badge" : ""}`}>{mode === "live" ? "LIVE" : "TESTNET"}</span>
+        <span className={`mode-badge ${mode === "live" ? "live-badge" : ""}`}>{mode === "live" ? "LIVE" : "PAPER"}</span>
       </div>
       <nav className="tabs" role="tablist">
         {[["trade", "Trade"], ["analysis", "Analysis"], ["risk", risk?.state?.status === "halted" ? "Risk !" : "Risk"], ["orders", `Orders${activeOrders.length ? ` · ${activeOrders.length}` : ""}`], ["history", `History${finishedOrders.length ? ` · ${finishedOrders.length}` : ""}`]].map(([id, label]) => (
@@ -303,6 +331,7 @@ export default function AutoOrderPanel({
           orderLimitReached={orderLimitReached}
           onOrdersChange={onOrdersChange}
           onRiskRefresh={onRiskRefresh}
+          onDraftChange={onDraftChange}
           onAccountRefresh={onFuturesRefresh}
         />
       )}
@@ -313,6 +342,17 @@ export default function AutoOrderPanel({
         <div className="balance-metric"><span>Held {baseAsset}</span><strong>{formatAmount(baseTotal, 8)} {baseAsset}</strong><small>{formatAmount(baseFree, 8)} free · {formatAmount(baseLocked, 8)} locked</small></div>
         <div className="balance-metric"><span>{baseAsset} value</span><strong>{formatAmount(baseValueUsdt, 2)} USDT</strong><small>At {currentPrice ? formatAmount(currentPrice, 6) : "—"} {quoteAsset}</small></div>
         <button type="button" className="refresh-balance-button" onClick={refreshBalance} disabled={refreshingBalance}>{refreshingBalance ? "Refreshing..." : "Refresh balance"}</button>
+        {mode === "paper" && (
+          editingBalance ? (
+            <form className="paper-balance-edit" onSubmit={saveBalance}>
+              <input type="number" min="0" step="any" autoFocus value={balanceDraft} onChange={(e) => setBalanceDraft(e.target.value)} placeholder={`${quoteAsset} balance`} aria-label={`New ${quoteAsset} balance`} />
+              <button type="submit" className="mini-button accent">Set</button>
+              <button type="button" className="mini-button" onClick={() => setEditingBalance(false)}>Cancel</button>
+            </form>
+          ) : (
+            <button type="button" className="refresh-balance-button" title="Set any starting capital for this simulated account" onClick={() => { setBalanceDraft(String(availableQuote)); setEditingBalance(true); }}>Edit balance</button>
+          )
+        )}
       </div>
       {setup && (
         <div className={`risk-setup ${autoRisk ? "is-auto" : ""}`}>
@@ -442,8 +482,8 @@ export default function AutoOrderPanel({
         ))}
       </div>
       {!futuresMarket && <div className="binance-open-section">
-        <div className="history-heading"><p className="panel-title">Open orders on Binance</p><span className="order-note">{mode === "live" ? "Live account view" : "Testnet account view"}</span></div>
-        {binanceOpenOrders.length === 0 && <p className="log-empty">No other open Binance orders.</p>}
+        <div className="history-heading"><p className="panel-title">{mode === "live" ? "Open orders on Binance" : "Open paper orders"}</p><span className="order-note">{mode === "live" ? "Live account view" : "Simulated account view"}</span></div>
+        {binanceOpenOrders.length === 0 && <p className="log-empty">{mode === "live" ? "No other open Binance orders." : "No other open paper orders."}</p>}
         {binanceOpenOrders.map((order) => (
           <div className="binance-order-row" key={`${order.symbol}-${order.orderId}`}>
             <strong>{order.symbol}</strong><span>{order.side} {order.type}</span><span>{order.origQty} @ {order.price || "market"}</span><b>{order.status}</b><button type="button" onClick={() => cancelExternalOrder(order)}>Cancel</button>

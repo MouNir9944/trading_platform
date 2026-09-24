@@ -45,8 +45,9 @@ export default function Header({
         <button type="button" className={view === "trading" ? "is-active" : ""} onClick={() => onViewChange("trading")}>Trading</button>
         <button type="button" className={view === "charts" ? "is-active" : ""} onClick={() => onViewChange("charts")}>Charts</button>
         <button type="button" className={view === "stocks" ? "is-active" : ""} onClick={() => onViewChange("stocks")}>My stocks</button>
+        <button type="button" className={view === "performance" ? "is-active" : ""} onClick={() => onViewChange("performance")}>Performance</button>
         <button type="button" className={view === "news" ? "is-active" : ""} onClick={() => onViewChange("news")}>News</button>
-        <button type="button" className={view === "amd" ? "is-active" : ""} onClick={() => onViewChange("amd")}>AMD Bot</button>
+        <button type="button" className={view === "strategies" ? "is-active" : ""} onClick={() => onViewChange("strategies")}>Strategies</button>
       </div>
 
       {view === "trading" && <PairPicker symbol={symbol} price={price} priceDirection={priceDirection} overview={overview} market={market} onMarketChange={onMarketChange} onSelect={onSymbolChange} />}
@@ -63,7 +64,7 @@ export default function Header({
           <i /> {connection === "error" ? "Connection lost" : connection === "ok" ? "Connected" : "Connecting…"}
         </span>
         <div className="segmented" role="group" aria-label="Account mode">
-          <button type="button" className={!live ? "is-active" : ""} onClick={() => live && onModeChange("testnet")}>Testnet</button>
+          <button type="button" className={!live ? "is-active" : ""} onClick={() => live && onModeChange("paper")} title="Practice with simulated capital against real prices">Paper</button>
           <button type="button" className={live ? "is-active is-live" : ""} onClick={() => !live && onModeChange("live")}>Live</button>
         </div>
         <select className="refresh-select" value={refreshMs} onChange={(e) => onRefreshChange(Number(e.target.value))} aria-label="Refresh interval">

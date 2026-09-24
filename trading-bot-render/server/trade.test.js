@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { findAmd } from "../shared/analysis/amd.js";
-import { AMD_TRADE_DEFAULTS, backtestAmd, judgeBacktest, planTrade, simulateAmd, summarizeTrades, sweepAmd } from "../shared/analysis/amdTrade.js";
+import { amdStrategy } from "../shared/strategies/amd.js";
+import { defaultParams } from "../shared/strategies/index.js";
+import { TRADE_DEFAULTS, backtestStrategy, judgeBacktest, planTrade, simulate, summarizeTrades, sweepTrades } from "../shared/strategies/trade.js";
 
 const bar = (i, open, high, low, close) => ({ time: 1_700_000_000 + i * 900, open, high, low, close, volume: 100 });
 
@@ -18,8 +19,9 @@ function scenario(tail = []) {
   return c;
 }
 const flip = (candles) => candles.map((c) => ({ ...c, open: 200 - c.open, close: 200 - c.close, high: 200 - c.low, low: 200 - c.high }));
-const setupOf = (candles) => findAmd(candles)[0];
-const run = (tail, options) => { const c = scenario(tail); return simulateAmd(c, findAmd(c), options); };
+const signals = (candles, params = {}) => amdStrategy.detect(candles, { ...defaultParams(amdStrategy), ...params });
+const setupOf = (candles) => signals(candles)[0];
+const run = (tail, options) => { const c = scenario(tail); return simulate(c, signals(c), options); };
 
 const RALLY = [[99.4, 100.4, 99.3, 100.3], [100.3, 101.8, 100.2, 101.6]];
 
@@ -30,7 +32,7 @@ test("planTrade: entry, stop and target for each mode, and why a plan is refused
   assert.deepEqual([close.side, close.entry, close.target], ["long", 99.4, 101.7]);
   assert.ok(close.stop < 97.9 && close.rewardRisk > 1.2);
 
-  const retest = planTrade(s, { entryMode: "fvg-retest" });
+  const retest = planTrade(s, { entryMode: "retest" });
   assert.equal(retest.entry, 98.8, "the top of the gap");
   assert.ok(retest.risk < close.risk && retest.rewardRisk > close.rewardRisk, "a retest entry has less risk and more reward");
 
@@ -39,7 +41,7 @@ test("planTrade: entry, stop and target for each mode, and why a plan is refused
 
   assert.match(planTrade(s, { minRewardRisk: 5 }).reason, /below 5/);
   assert.match(planTrade(s, { longs: false }).reason, /switched off/);
-  const behind = { ...s, plan: { ...s.plan, target: 99 } };
+  const behind = { ...s, target: 99 };
   assert.match(planTrade(behind).reason, /already behind/);
 
   const short = planTrade(setupOf(flip(scenario(RALLY))));
@@ -98,10 +100,10 @@ test("an order that is never touched lapses after the expiry", () => {
 });
 
 test("a retest entry waits for the gap to be tested", () => {
-  const miss = run([[99.4, 99.9, 99.3, 99.6], [99.6, 101.8, 99.5, 101.7]], { entryMode: "fvg-retest" });
+  const miss = run([[99.4, 99.9, 99.3, 99.6], [99.6, 101.8, 99.5, 101.7]], { entryMode: "retest" });
   assert.equal(miss.trades.length, 0, "price never came back to 98.8");
   assert.equal(miss.missed.targetFirst, 1);
-  const hit = run([[99.4, 99.6, 98.7, 99.3], [99.3, 101.9, 99.2, 101.8]], { entryMode: "fvg-retest" });
+  const hit = run([[99.4, 99.6, 98.7, 99.3], [99.3, 101.9, 99.2, 101.8]], { entryMode: "retest" });
   assert.equal(hit.trades.length, 1);
   assert.equal(hit.trades[0].entry, 98.8);
   assert.equal(hit.trades[0].reason, "target");
@@ -118,7 +120,7 @@ test("a trade still open at the end of the data is reported apart and not counte
 test("the mirror image behaves the same as a short", () => {
   const long = run(RALLY).trades[0];
   const c = flip(scenario(RALLY));
-  const short = simulateAmd(c, findAmd(c)).trades[0];
+  const short = simulate(c, signals(c)).trades[0];
   assert.equal(short.side, "short");
   assert.equal(short.reason, "target");
   assert.ok(Math.abs(short.r - long.r) < 0.05, `long ${long.r} short ${short.r}`); // percentage fees differ a little at mirrored price levels
@@ -146,14 +148,14 @@ test("one position at a time, and no look-ahead: trades closed on a prefix are t
   let total = 0;
   for (const seed of [1, 2, 3, 4, 5, 6]) {
     const candles = noisy(seed);
-    const options = { minRewardRisk: 0, entryMode: seed % 2 ? "limit-close" : "fvg-retest" };
-    const full = simulateAmd(candles, findAmd(candles, null, { minRewardRisk: 0 }), options).trades;
+    const options = { minRewardRisk: 0, entryMode: seed % 2 ? "limit-close" : "retest" };
+    const full = simulate(candles, signals(candles), options).trades;
     total += full.length;
     full.forEach((t, i) => { if (i) assert.ok(t.entryIndex > full[i - 1].exitIndex, `seed ${seed}: trades overlap`); });
     const key = (t) => JSON.stringify([t.id, t.entryIndex, t.exitIndex, t.entry, t.exitPrice, t.reason]);
     for (let cut = 100; cut < candles.length; cut += 37) {
       const part = candles.slice(0, cut);
-      const prefix = simulateAmd(part, findAmd(part, null, { minRewardRisk: 0 }), options).trades;
+      const prefix = simulate(part, signals(part), options).trades;
       const fullKeys = new Set(full.map(key));
       for (const t of prefix) assert.ok(fullKeys.has(key(t)), `seed ${seed} cut ${cut}: a trade that closed early changed`);
     }
@@ -201,7 +203,7 @@ test("the verdict says what the numbers mean, including the caveats", () => {
 
 test("the backtest pools trades across pairs, reports each pair, and flags short data", () => {
   const datasets = [{ symbol: "AAA", candles: noisy(2) }, { symbol: "BBB", candles: noisy(5) }, { symbol: "TINY", candles: noisy(1).slice(0, 30) }];
-  const result = backtestAmd(datasets, { engine: { minRewardRisk: 0 }, trade: { minRewardRisk: 0 } });
+  const result = backtestStrategy(datasets, { strategy: amdStrategy, trade: { minRewardRisk: 0 } });
   assert.equal(result.perSymbol.length, 3);
   assert.equal(result.perSymbol[2].error, "not enough candles");
   const pooled = result.perSymbol[0].stats.trades + result.perSymbol[1].stats.trades;
@@ -212,13 +214,24 @@ test("the backtest pools trades across pairs, reports each pair, and flags short
   assert.ok(Number.isFinite(result.perSymbol[0].buyAndHoldPct));
   assert.equal(result.counts.filled, pooled);
   assert.ok(result.counts.signals >= pooled);
-  assert.equal(result.options.trade.entryMode, AMD_TRADE_DEFAULTS.entryMode);
+  assert.equal(result.options.trade.entryMode, TRADE_DEFAULTS.entryMode);
 });
 
 test("the sweep compares ways of trading the same signals", () => {
-  const rows = sweepAmd([{ symbol: "AAA", candles: noisy(2) }, { symbol: "BBB", candles: noisy(5) }], { engine: { minRewardRisk: 0 }, trade: { minRewardRisk: 0 } });
+  const rows = sweepTrades([{ symbol: "AAA", candles: noisy(2) }, { symbol: "BBB", candles: noisy(5) }], { strategy: amdStrategy, trade: { minRewardRisk: 0 } });
   assert.equal(rows.length, 8);
   assert.ok(rows.every((r) => r.label && r.stats && r.verdict));
-  assert.deepEqual([...new Set(rows.map((r) => r.trade.entryMode))].sort(), ["fvg-retest", "limit-close"]);
-  assert.ok(rows.some((r) => r.trade.targetMode === "range") && rows.some((r) => r.trade.targetR === 3));
+  assert.deepEqual([...new Set(rows.map((r) => r.trade.entryMode))].sort(), ["limit-close", "retest"]);
+  assert.ok(rows.some((r) => r.trade.targetMode === "own") && rows.some((r) => r.trade.targetR === 3));
+});
+
+test("a strategy without a retest price is refused a retest entry, one without a target must use a multiple of the risk", () => {
+  const plain = { dir: "bull", formedAt: 10, entry: 100, stop: 98 };
+  assert.match(planTrade(plain, { entryMode: "retest" }).reason, /no retest price/);
+  assert.match(planTrade(plain).reason, /gives no target/);
+  const r = planTrade(plain, { targetMode: "r", targetR: 3 });
+  assert.equal(r.ok, true);
+  assert.equal(r.target, 106);
+  const rows = sweepTrades([{ symbol: "AAA", candles: noisy(2) }], { strategy: { ...amdStrategy, supportsRetest: false }, trade: { minRewardRisk: 0 } });
+  assert.equal(rows.length, 4, "no retest variants for a strategy that cannot retest");
 });

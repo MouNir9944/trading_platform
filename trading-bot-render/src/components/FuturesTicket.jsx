@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 import { checkOrder, riskSetup } from "../../shared/risk.js";
-import { closeFuturesPosition, createFuturesOrder } from "../api.js";
+import { closeFuturesPosition, createFuturesOrder, setPaperBalance } from "../api.js";
 import { usePersistentState, oneOf, isText } from "../lib/persist.js";
 
 const FEE_PERCENT = 0.05; // the server uses your real commission rate; this is only for the preview
@@ -20,7 +20,7 @@ const round = (n, digits) => Math.round(n * 10 ** digits) / 10 ** digits;
  */
 export default function FuturesTicket({
   symbol, currentPrice, mode, account, accountError, risk, analysis, symbolInfo, orders, plan, limitsRow, orderLimitReached,
-  onOrdersChange, onRiskRefresh, onAccountRefresh,
+  onOrdersChange, onRiskRefresh, onAccountRefresh, onDraftChange = () => {},
 }) {
   const [side, setSide] = usePersistentState("pref:futures-side", "long", oneOf(["long", "short"]));
   const [entryPrice, setEntryPrice] = useState("");
@@ -31,6 +31,8 @@ export default function FuturesTicket({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [closing, setClosing] = useState(null);
+  const [editingBalance, setEditingBalance] = useState(false);
+  const [balanceDraft, setBalanceDraft] = useState("");
   const [autoRisk, setAutoRisk] = useState(() => {
     try { return window.localStorage.getItem("auto-risk-futures") !== "0"; } catch { return true; }
   });
@@ -106,6 +108,15 @@ export default function FuturesTicket({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plan?.nonce]);
 
+  // Report this ticket to the chart, so it can draw the entry/stop/target as draggable lines. Dragging one only
+  // ever feeds back into these same fields (above), so it can never place an order the risk rules would refuse.
+  useEffect(() => {
+    if (!ready) { onDraftChange(null); return; }
+    onDraftChange({ symbol, side, entry, stopLoss: stopPrice, takeProfit: targetPrice, quantity, feePercent: FEE_PERCENT, blocked });
+    return () => onDraftChange(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbol, side, entry, stopPrice, targetPrice, ready, quantity, blocked]);
+
   async function submit(event) {
     event.preventDefault();
     setError(null);
@@ -130,6 +141,22 @@ export default function FuturesTicket({
       setError(err.message);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function saveBalance(event) {
+    event.preventDefault();
+    const amount = Number(balanceDraft);
+    if (!Number.isFinite(amount) || amount < 0) {
+      setError("Enter a balance of zero or more");
+      return;
+    }
+    try {
+      await setPaperBalance("futures", amount);
+      setEditingBalance(false);
+      onAccountRefresh();
+    } catch (err) {
+      setError(err.message);
     }
   }
 
@@ -160,7 +187,7 @@ export default function FuturesTicket({
           <p>{accountError}</p>
           {missingKeys && (
             <p>
-              Set <b>BINANCE_FUTURES_API_KEY</b> and <b>BINANCE_FUTURES_API_SECRET</b> {mode === "testnet" ? "(keys from Binance Demo Trading futures; your Spot testnet keys do not work here)" : "(or enable Futures on your live key)"} in the server environment and restart. See the README.
+              Set <b>BINANCE_FUTURES_API_KEY_real</b> and <b>BINANCE_FUTURES_API_SECRET_real</b> (or enable Futures on your live key) in the server environment and restart. See the README.
             </p>
           )}
         </div>
@@ -174,6 +201,17 @@ export default function FuturesTicket({
         <div className="balance-metric"><span>Futures wallet</span><strong>{fmt(wallet)} USDT</strong><small>Total balance</small></div>
         <div className="balance-metric"><span>Unrealized P/L</span><strong className={(account?.unrealized ?? 0) >= 0 ? "profit-estimate" : "loss-estimate"}>{(account?.unrealized ?? 0) >= 0 ? "+" : "−"}{fmt(Math.abs(account?.unrealized ?? 0))} USDT</strong><small>Open positions</small></div>
         <button type="button" className="refresh-balance-button" onClick={onAccountRefresh}>Refresh</button>
+        {mode === "paper" && (
+          editingBalance ? (
+            <form className="paper-balance-edit" onSubmit={saveBalance}>
+              <input type="number" min="0" step="any" autoFocus value={balanceDraft} onChange={(e) => setBalanceDraft(e.target.value)} placeholder="USDT balance" aria-label="New futures wallet balance" />
+              <button type="submit" className="mini-button accent">Set</button>
+              <button type="button" className="mini-button" onClick={() => setEditingBalance(false)}>Cancel</button>
+            </form>
+          ) : (
+            <button type="button" className="refresh-balance-button" title="Set any starting capital for this simulated account" onClick={() => { setBalanceDraft(String(wallet)); setEditingBalance(true); }}>Edit balance</button>
+          )
+        )}
       </div>
 
       {account?.positions?.length > 0 && (

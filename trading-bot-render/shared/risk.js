@@ -89,7 +89,7 @@ function closedTrades(orders) {
 
 /**
  * Where the account stands against every limit right now.
- * @param orders every managed order of ONE account mode (testnet or live)
+ * @param orders every managed order of ONE account mode (paper or live)
  */
 export function computeRiskState({ orders, settings, capital, now = Date.now() }) {
   const closed = closedTrades(orders);

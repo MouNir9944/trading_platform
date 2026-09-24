@@ -1,7 +1,8 @@
 import { createApp } from "./app.js";
 import * as binance from "./binance.js";
 import { DATA_DIR } from "./config.js";
-import { AutoAmd } from "./autoAmd.js";
+import { createBots } from "./autoTrader.js";
+import { STRATEGIES } from "../shared/strategies/index.js";
 import { FuturesManager } from "./futures.js";
 import { Notifier } from "./notifier.js";
 import { OrderManager } from "./orders.js";
@@ -46,15 +47,18 @@ await futuresManager.init();
 
 const notifier = new Notifier({ store });
 await notifier.init();
-const autoAmd = new AutoAmd({
+const openOrder = (o, mode, symbol) => o.account_mode === mode && o.symbol === symbol && (o.status === "WAITING_ENTRY" || o.status === "PROTECTED" || o.status === "PLACING");
+const bots = createBots(STRATEGIES, {
   store,
   notifier,
   getMode: binance.getMode,
-  // the bot reads the same market data its orders will trade against (Testnet prices for Testnet orders)
+  // the bot reads the same market data its orders will trade against
   getKlines: (market, mode, symbol, interval, limit) =>
     (market === "futures" ? binance.getFuturesTrader(mode) : binance.getClient(mode)).getKlines(symbol, interval, limit),
   managers: { spot: manager, futures: futuresManager },
   getRiskSettings: () => manager.getRiskSettings(),
+  // a symbol already traded (by another strategy or by hand) is left alone
+  isBusy: (market, mode, symbol) => (market === "futures" ? futuresManager : manager).listOrders(mode).some((o) => openOrder(o, mode, symbol)),
   getBalance: async (market, mode) => {
     if (market === "futures") {
       const account = await futuresManager.getAccount(mode);
@@ -65,12 +69,12 @@ const autoAmd = new AutoAmd({
     return { wallet: free + Number(usdt?.locked ?? 0), available: free };
   },
 });
-await autoAmd.init();
+await bots.init();
 
 const { app } = createApp({
   orderManager: manager,
   futuresManager,
-  autoAmd,
+  bots,
   notifier,
   storage: store.kind,
   auth: password ? { username: process.env.APP_USERNAME || "admin", password } : undefined,
@@ -81,15 +85,15 @@ const server = app.listen(port, "0.0.0.0", () => {
   console.log(`Trading dashboard listening on :${port} (storage: ${store.kind})`);
   manager.start();
   futuresManager.start();
-  autoAmd.start();
+  bots.start();
 });
 
 async function shutdown() {
   manager.stop();
   futuresManager.stop();
-  autoAmd.stop();
+  bots.stop();
   server.close();
-  await Promise.race([Promise.all([manager.flush(), futuresManager.flush(), autoAmd.flush(), notifier.flush()]).then(() => store.close()), new Promise((r) => setTimeout(r, 4000))]);
+  await Promise.race([Promise.all([manager.flush(), futuresManager.flush(), bots.flush(), notifier.flush()]).then(() => store.close()), new Promise((r) => setTimeout(r, 4000))]);
   process.exit(0);
 }
 process.on("SIGTERM", shutdown);

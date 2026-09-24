@@ -80,7 +80,7 @@ export function buildOverview({ tickers, tradable, marketCaps = new Map(), minVo
     });
   }
 
-  // `minVolume` overrides the per-category thresholds (0 disables them, e.g. for testnet's synthetic data).
+  // `minVolume` overrides the per-category thresholds (0 disables them, e.g. when live data is unreachable).
   const eligible = rows.filter((r) => r.quoteVolume >= (minVolume === MIN_SCORED_VOLUME ? MIN_VOLUME_BY_CATEGORY[r.category] ?? minVolume : minVolume));
   const liquidity = percentiles(eligible.map((r) => r.quoteVolume));
   const activity = percentiles(eligible.map((r) => r.trades));

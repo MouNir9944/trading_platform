@@ -177,7 +177,7 @@ test("HTTP: search by ticker or company name (only Binance-listed stocks), and h
     async search(q) { return q === "apple" ? [{ symbol: "AAPL", name: "Apple Inc.", type: "EQUITY" }, { symbol: "APLE", name: "Apple Hospitality", type: "EQUITY" }] : []; },
   };
   const store = new FileStore({ dir: fs.mkdtempSync(path.join(os.tmpdir(), "stk-")) });
-  const spot = new OrderManager({ getClient: () => ({}), getMode: () => "testnet", getTradingFee: async () => ({}), store });
+  const spot = new OrderManager({ getClient: () => ({}), getMode: () => "paper", getTradingFee: async () => ({}), store });
   await spot.init();
   const { app } = createApp({ orderManager: spot, stocksClient: fakeStocks, stockData: fakeYahoo });
   const server = app.listen(0);

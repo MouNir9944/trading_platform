@@ -1,22 +1,23 @@
 /**
- * The AMD bot: watches the pairs you choose on the SERVER (so it works with every tab closed), and for each fresh
- * signal it notifies you and, if you armed it, places the order through the same managers, risk rules and exchange
- * protection as a manual order.
+ * The automatic trader: one instance per strategy. It watches the pairs you choose on the SERVER (so it works with
+ * every tab closed), and for each fresh signal it notifies you and, if you armed it, places the order through the same
+ * managers, risk rules and exchange protection as a manual order.
  *
  * Safety, in the order it matters:
  *  - everything is OFF until you switch it on; "watch" (notifications only) and "orders" are separate switches;
- *  - orders are armed for ONE account mode. If the account is switched (testnet <-> live) they stop until re-armed,
+ *  - orders are armed for ONE account mode. If the account is switched (paper <-> live) they stop until re-armed,
  *    and arming live needs the word LIVE;
  *  - the bot never bypasses a rule: size comes from your risk limits, the leverage is capped by your limit and by the
  *    liquidation check, and the spot / futures managers apply every other rule again when the order is created;
- *  - hard caps of its own: open orders, orders per day, one per contract; entries that do not fill lapse and are cancelled;
+ *  - hard caps of its own: open orders, orders per day, one per contract (also when another strategy or you already
+ *    hold one); entries that do not fill lapse and are cancelled;
  *  - it only acts on signals from the last closed candles, once each (remembered across restarts), and never chases a
  *    price that has already moved past the target or the stop;
  *  - every step (signal, order, fill, close, refusal, error) is a notification with the reason.
  */
 import { checkOrder } from "../shared/risk.js";
-import { AMD_DEFAULTS, findAmd } from "../shared/analysis/amd.js";
-import { AMD_TRADE_DEFAULTS, ENTRY_MODES, TARGET_MODES, planTrade } from "../shared/analysis/amdTrade.js";
+import { ENTRY_MODES, LEGACY_MODES, TARGET_MODES, TRADE_DEFAULTS, planTrade } from "../shared/strategies/trade.js";
+import { defaultParams, detectSignals, resolveParams } from "../shared/strategies/index.js";
 import { toCandles } from "../shared/analysis/index.js";
 import { RiskBlockedError } from "./orders.js";
 
@@ -25,23 +26,24 @@ const MAX_PAIRS = 12;
 const MAX_SEEN = 3000;
 const STALE_CANDLES = 1; // a signal formed more than this many candles ago is history, not news
 
-export const AUTO_DEFAULTS = Object.freeze({
+export const autoDefaults = (strategy) => ({
   watch: false,
   orders: false,
   armedMode: null,
   market: "futures",
   pairs: [],
-  entryMode: AMD_TRADE_DEFAULTS.entryMode,
-  targetMode: AMD_TRADE_DEFAULTS.targetMode,
-  targetR: AMD_TRADE_DEFAULTS.targetR,
-  expiryCandles: AMD_TRADE_DEFAULTS.expiryCandles,
+  entryMode: TRADE_DEFAULTS.entryMode,
+  targetMode: TRADE_DEFAULTS.targetMode,
+  targetR: TRADE_DEFAULTS.targetR,
+  expiryCandles: TRADE_DEFAULTS.expiryCandles,
   longs: true,
-  shorts: true,
+  shorts: strategy.directions.includes("short"),
+  minRewardRisk: TRADE_DEFAULTS.minRewardRisk,
   leverage: 3,
   maxOpenOrders: 2,
   maxOrdersPerDay: 3,
   pushSkips: false, // send "skipped" events to Telegram / the webhook too (they always show in the app)
-  engine: { minRangeBars: AMD_DEFAULTS.minRangeBars, maxRangeAtr: AMD_DEFAULTS.maxRangeAtr, minRewardRisk: AMD_DEFAULTS.minRewardRisk },
+  params: defaultParams(strategy),
 });
 
 const bad = (message) => Object.assign(new Error(message), { httpStatus: 422 });
@@ -52,10 +54,11 @@ const inRange = (value, name, min, max, integer = false) => {
 };
 
 /** Validate a partial config over the current one. Throws a readable error on anything wrong. */
-export function normalizeAutoConfig(patch, current = AUTO_DEFAULTS) {
-  const next = { ...current, engine: { ...current.engine } };
+export function normalizeAutoConfig(strategy, patch, current = autoDefaults(strategy)) {
+  const defaults = autoDefaults(strategy);
+  const next = { ...current, params: { ...current.params } };
   for (const [key, value] of Object.entries(patch ?? {})) {
-    if (!(key in AUTO_DEFAULTS)) throw bad(`Unknown setting: ${key}`);
+    if (!(key in defaults)) throw bad(`Unknown setting: ${key}`);
     if (key === "armedMode") continue; // set only by arming
     if (["watch", "orders", "longs", "shorts", "pushSkips"].includes(key)) {
       if (typeof value !== "boolean") throw bad(`${key} must be true or false`);
@@ -64,24 +67,21 @@ export function normalizeAutoConfig(patch, current = AUTO_DEFAULTS) {
       if (value !== "spot" && value !== "futures") throw bad("market must be spot or futures");
       next.market = value;
     } else if (key === "entryMode") {
-      if (!ENTRY_MODES.includes(value)) throw bad(`entryMode must be one of ${ENTRY_MODES.join(", ")}`);
-      next.entryMode = value;
+      const mode = LEGACY_MODES[value] ?? value;
+      if (!ENTRY_MODES.includes(mode)) throw bad(`entryMode must be one of ${ENTRY_MODES.join(", ")}`);
+      next.entryMode = mode;
     } else if (key === "targetMode") {
-      if (!TARGET_MODES.includes(value)) throw bad(`targetMode must be one of ${TARGET_MODES.join(", ")}`);
-      next.targetMode = value;
+      const mode = LEGACY_MODES[value] ?? value;
+      if (!TARGET_MODES.includes(mode)) throw bad(`targetMode must be one of ${TARGET_MODES.join(", ")}`);
+      next.targetMode = mode;
     } else if (key === "targetR") next.targetR = inRange(value, "targetR", 1, 5);
     else if (key === "expiryCandles") next.expiryCandles = inRange(value, "expiryCandles", 1, 10, true);
+    else if (key === "minRewardRisk") next.minRewardRisk = inRange(value, "minRewardRisk", 0, 5);
     else if (key === "leverage") next.leverage = inRange(value, "leverage", 1, 20, true);
     else if (key === "maxOpenOrders") next.maxOpenOrders = inRange(value, "maxOpenOrders", 1, 10, true);
     else if (key === "maxOrdersPerDay") next.maxOrdersPerDay = inRange(value, "maxOrdersPerDay", 1, 50, true);
-    else if (key === "engine") {
-      const e = value ?? {};
-      next.engine = {
-        minRangeBars: e.minRangeBars == null ? next.engine.minRangeBars : inRange(e.minRangeBars, "minRangeBars", 4, 40, true),
-        maxRangeAtr: e.maxRangeAtr == null ? next.engine.maxRangeAtr : inRange(e.maxRangeAtr, "maxRangeAtr", 1.5, 6),
-        minRewardRisk: e.minRewardRisk == null ? next.engine.minRewardRisk : inRange(e.minRewardRisk, "minRewardRisk", 0, 5),
-      };
-    } else if (key === "pairs") {
+    else if (key === "params") next.params = resolveParams(strategy, { ...next.params, ...(value ?? {}) });
+    else if (key === "pairs") {
       if (!Array.isArray(value)) throw bad("pairs must be a list");
       if (value.length > MAX_PAIRS) throw bad(`at most ${MAX_PAIRS} pairs`);
       const seen = new Set();
@@ -96,6 +96,8 @@ export function normalizeAutoConfig(patch, current = AUTO_DEFAULTS) {
       });
     }
   }
+  if (next.entryMode === "retest" && !strategy.supportsRetest) throw bad(`${strategy.name} has no retest entry`);
+  if (!strategy.directions.includes("short")) next.shorts = false;
   if (next.market === "spot") next.shorts = false; // spot cannot be shorted
   return next;
 }
@@ -112,9 +114,10 @@ function refusals(verdict) {
 }
 const fmt = (n) => (n == null || !Number.isFinite(n) ? "—" : Math.abs(n) >= 1000 ? n.toFixed(2) : Math.abs(n) >= 1 ? n.toFixed(4) : n.toPrecision(4));
 
-export class AutoAmd {
+export class AutoTrader {
   /**
    * @param {object} deps
+   * @param {object} deps.strategy    the strategy this trader runs (shared/strategies)
    * @param {object} deps.store       getSetting / setSetting
    * @param {import("./notifier.js").Notifier} deps.notifier
    * @param {() => string} deps.getMode
@@ -122,10 +125,13 @@ export class AutoAmd {
    * @param {{spot: object, futures: object}} deps.managers  OrderManager and FuturesManager
    * @param {() => object} deps.getRiskSettings
    * @param {(market, mode) => Promise<{wallet: number, available: number}>} deps.getBalance  quote-asset (USDT) balance
+   * @param {(market, mode, symbol) => boolean} [deps.isBusy]  true when ANY order (another strategy's, or yours) is already open on the symbol
    */
-  constructor({ store, notifier, getMode, getKlines, managers, getRiskSettings, getBalance, now = Date.now, tickMs = 30_000 }) {
-    Object.assign(this, { store, notifier, getMode, getKlines, managers, getRiskSettings, getBalance, now, tickMs });
-    this.config = { ...AUTO_DEFAULTS, engine: { ...AUTO_DEFAULTS.engine } };
+  constructor({ strategy, store, notifier, getMode, getKlines, managers, getRiskSettings, getBalance, isBusy = () => false, now = Date.now, tickMs = 30_000 }) {
+    Object.assign(this, { strategy, store, notifier, getMode, getKlines, managers, getRiskSettings, getBalance, isBusy, now, tickMs });
+    this.configKey = `auto_bot:${strategy.id}`;
+    this.stateKey = `auto_bot_state:${strategy.id}`;
+    this.config = autoDefaults(strategy);
     this.seen = new Set();
     this.pending = [];
     this.day = null;
@@ -139,15 +145,19 @@ export class AutoAmd {
   }
 
   async init() {
+    // the AMD-only bot of earlier versions kept its settings under other names
+    const legacy = this.strategy.id === "amd_fvg";
     try {
-      this.config = normalizeAutoConfig((await this.store.getSetting("auto_amd")) ?? {});
-      const saved = (await this.store.getSetting("auto_amd")) ?? {};
-      this.config.armedMode = saved.armedMode === "testnet" || saved.armedMode === "live" ? saved.armedMode : null;
+      const saved = (await this.store.getSetting(this.configKey)) ?? (legacy ? (await this.store.getSetting("auto_amd")) : null) ?? {};
+      const { engine, ...rest } = saved; // `engine` became `params` and `minRewardRisk`
+      const migrated = engine ? { ...rest, params: { minRangeBars: engine.minRangeBars, maxRangeAtr: engine.maxRangeAtr }, minRewardRisk: engine.minRewardRisk } : rest;
+      this.config = normalizeAutoConfig(this.strategy, migrated);
+      this.config.armedMode = saved.armedMode === "paper" || saved.armedMode === "live" ? saved.armedMode : null;
       if (!this.config.orders) this.config.armedMode = null;
     } catch (err) {
-      console.error(`Ignoring invalid saved bot settings: ${err.message}`);
+      console.error(`Ignoring invalid saved settings for ${this.strategy.id}: ${err.message}`);
     }
-    const state = (await this.store.getSetting("auto_amd_state")) ?? {};
+    const state = (await this.store.getSetting(this.stateKey)) ?? (legacy ? (await this.store.getSetting("auto_amd_state")) : null) ?? {};
     this.seen = new Set(state.seen ?? []);
     this.pending = state.pending ?? [];
     this.day = state.day ?? null;
@@ -160,7 +170,7 @@ export class AutoAmd {
 
   start() {
     if (this.timer) return;
-    this.timer = setInterval(() => this.tick().catch((err) => console.error(`AMD bot tick failed: ${err.message}`)), this.tickMs);
+    this.timer = setInterval(() => this.tick().catch((err) => console.error(`${this.strategy.name} bot tick failed: ${err.message}`)), this.tickMs);
     this.timer.unref();
     setTimeout(() => this.tick().catch(() => {}), 3000).unref();
   }
@@ -171,13 +181,13 @@ export class AutoAmd {
   }
 
   getConfig() {
-    return { ...this.config, engine: { ...this.config.engine }, pairs: this.config.pairs.map((p) => ({ ...p })) };
+    return { ...this.config, params: { ...this.config.params }, pairs: this.config.pairs.map((p) => ({ ...p })) };
   }
 
   /** Change settings. Arming orders is a deliberate act: live needs the word LIVE, and it binds to the current account mode. */
   async setConfig(patch, { confirm } = {}) {
     const before = this.config;
-    const next = normalizeAutoConfig(patch, before);
+    const next = normalizeAutoConfig(this.strategy, patch, before);
     const mode = this.getMode();
     next.armedMode = before.armedMode;
     if (next.market !== before.market) next.orders = false; // a different market is a different bot: re-arm on purpose
@@ -192,9 +202,9 @@ export class AutoAmd {
     this.modeWarned = false;
     this.#saveConfig();
     if (next.orders && !before.orders) {
-      await this.notifier.push({ type: "armed", level: "warn", source: "amd", title: `Automatic orders ARMED on ${mode === "live" ? "the LIVE account" : "Testnet"}`, body: `${next.pairs.map((p) => `${p.symbol} ${p.interval}`).join(", ")} · ${next.market} · risk from your limits · max ${next.maxOpenOrders} open, ${next.maxOrdersPerDay} a day.` });
+      await this.notifier.push({ type: "armed", level: "warn", source: "bot", strategy: this.strategy.id, strategyName: this.strategy.name, title: `${this.strategy.name}: automatic orders ARMED on ${mode === "live" ? "the LIVE account" : "Paper"}`, body: `${next.pairs.map((p) => `${p.symbol} ${p.interval}`).join(", ")} · ${next.market} · risk from your limits · max ${next.maxOpenOrders} open, ${next.maxOrdersPerDay} a day.` });
     } else if (!next.orders && before.orders) {
-      await this.notifier.push({ type: "disarmed", level: "info", source: "amd", title: "Automatic orders switched off", body: "Open orders keep their stop-loss and take-profit on Binance." });
+      await this.notifier.push({ type: "disarmed", level: "info", source: "bot", strategy: this.strategy.id, strategyName: this.strategy.name, title: `${this.strategy.name}: automatic orders switched off`, body: "Open orders keep their stop-loss and take-profit on Binance." });
     }
     return this.getConfig();
   }
@@ -205,6 +215,7 @@ export class AutoAmd {
     const c = this.config;
     const armedHere = c.orders && c.armedMode === mode;
     return {
+      strategy: this.strategy.id,
       mode,
       watching: c.watch || c.orders,
       ordering: armedHere,
@@ -218,7 +229,7 @@ export class AutoAmd {
   }
 
   #key(pair) {
-    return `${this.config.market}:${pair.symbol}:${pair.interval}`;
+    return `${this.strategy.id}:${this.config.market}:${pair.symbol}:${pair.interval}`;
   }
 
   #todayCount() {
@@ -228,18 +239,18 @@ export class AutoAmd {
 
   #saveConfig() {
     const snapshot = { ...this.config };
-    this.writeQueue = this.writeQueue.then(() => this.store.setSetting("auto_amd", snapshot)).catch((err) => console.error(`Could not save bot settings: ${err.message}`));
+    this.writeQueue = this.writeQueue.then(() => this.store.setSetting(this.configKey, snapshot)).catch((err) => console.error(`Could not save bot settings: ${err.message}`));
   }
 
   #saveState() {
     while (this.seen.size > MAX_SEEN) this.seen.delete(this.seen.values().next().value);
     const snapshot = { seen: [...this.seen], pending: this.pending.map((p) => ({ ...p })), day: this.day, count: this.count };
-    this.writeQueue = this.writeQueue.then(() => this.store.setSetting("auto_amd_state", snapshot)).catch((err) => console.error(`Could not save bot state: ${err.message}`));
+    this.writeQueue = this.writeQueue.then(() => this.store.setSetting(this.stateKey, snapshot)).catch((err) => console.error(`Could not save bot state: ${err.message}`));
   }
 
   async #note(event) {
     const external = event.type === "skipped" ? this.config.pushSkips : event.external;
-    return this.notifier.push({ source: "amd", ...event, external });
+    return this.notifier.push({ source: "bot", strategy: this.strategy.id, strategyName: this.strategy.name, ...event, external });
   }
 
   /** One pass: follow the orders already placed, then look at each pair whose candle has just closed. */
@@ -285,12 +296,12 @@ export class AutoAmd {
     state.lastClosedOpen = closed[closed.length - 1].time * 1000;
 
     const fresh = [];
-    for (const setup of findAmd(closed, null, this.config.engine)) {
+    for (const setup of detectSignals(this.strategy, closed, this.config.params)) {
       if (closed.length - 1 - setup.formedAt > STALE_CANDLES) continue;
       const id = `${key}:${setup.dir}:${closed[setup.formedAt].time}`;
       if (this.seen.has(id)) continue;
       this.seen.add(id);
-      if (setup.status === "active") fresh.push({ setup, id });
+      if (setup.status == null || setup.status === "active") fresh.push({ setup, id });
     }
     if (fresh.length) this.#saveState();
     for (const { setup, id } of fresh) {
@@ -305,11 +316,12 @@ export class AutoAmd {
     const show = planTrade(setup, { ...opts, longs: true, shorts: true });
     const buy = setup.dir === "bull";
     const clock = new Date(closed[setup.formedAt].time * 1000).toISOString().slice(11, 16);
+    const why = setup.reasons.join(". ");
     await this.#note({
       type: "signal",
       level: buy ? "success" : "warn",
-      title: `AMD ${buy ? "buy" : "sell"} signal · ${pair.symbol} ${pair.interval}`,
-      body: `${buy ? "Range low swept, then a bullish" : "Range high swept, then a bearish"} fair value gap closed (${clock} UTC).${show.ok ? ` Entry ${fmt(show.entry)}, stop ${fmt(show.stop)}, target ${fmt(show.target)} (${show.rewardRisk.toFixed(1)}R).` : ` No trade plan: ${show.reason}.`}${!buy && market === "spot" ? " Spot is long-only: treat it as an exit warning." : ""}`,
+      title: `${this.strategy.name}: ${buy ? "buy" : "sell"} signal · ${pair.symbol} ${pair.interval}`,
+      body: `${why} (${clock} UTC).${show.ok ? ` Entry ${fmt(show.entry)}, stop ${fmt(show.stop)}, target ${fmt(show.target)} (${show.rewardRisk.toFixed(1)}R).` : ` No trade plan: ${show.reason}.`}${!buy && market === "spot" ? " Spot is long-only: treat it as an exit warning." : ""}`,
       symbol: pair.symbol, market, interval: pair.interval, dir: setup.dir,
       plan: show.ok ? { side: show.side, entry: show.entry, stopLoss: show.stop, target: show.target, riskReward: show.rewardRisk } : null,
       signalId: id,
@@ -321,12 +333,12 @@ export class AutoAmd {
     const c = this.config;
     return {
       entryMode: c.entryMode, targetMode: c.targetMode, targetR: c.targetR, expiryCandles: c.expiryCandles,
-      longs: c.longs, shorts: c.market === "futures" && c.shorts, minRewardRisk: c.engine.minRewardRisk,
+      longs: c.longs, shorts: c.market === "futures" && c.shorts, minRewardRisk: c.minRewardRisk,
     };
   }
 
   async #skip(pair, setup, id, reason, level = "info") {
-    await this.#note({ type: "skipped", level, title: `Order not placed · ${pair.symbol} ${pair.interval}`, body: reason, symbol: pair.symbol, market: this.config.market, interval: pair.interval, dir: setup.dir, signalId: id });
+    await this.#note({ type: "skipped", level, title: `${this.strategy.name}: order not placed · ${pair.symbol} ${pair.interval}`, body: reason, symbol: pair.symbol, market: this.config.market, interval: pair.interval, dir: setup.dir, signalId: id });
   }
 
   async #order(pair, closed, setup, id) {
@@ -335,7 +347,7 @@ export class AutoAmd {
     if (c.armedMode !== mode) {
       if (!this.modeWarned) {
         this.modeWarned = true;
-        await this.#note({ type: "error", level: "warn", title: "Automatic orders are paused", body: `They were armed for ${c.armedMode}, but the account is on ${mode}. Arm them again on purpose to continue.`, external: true });
+        await this.#note({ type: "error", level: "warn", title: `${this.strategy.name}: automatic orders are paused`, body: `They were armed for ${c.armedMode}, but the account is on ${mode}. Arm them again on purpose to continue.`, external: true });
       }
       return;
     }
@@ -351,14 +363,14 @@ export class AutoAmd {
 
     const active = this.pending.filter((p) => p.market === c.market && p.mode === mode);
     if (active.length >= c.maxOpenOrders) return this.#skip(pair, setup, id, `Already ${active.length} automatic orders open (limit ${c.maxOpenOrders}).`);
-    if (active.some((p) => p.symbol === pair.symbol)) return this.#skip(pair, setup, id, `There is already an automatic ${pair.symbol} order open.`);
+    if (active.some((p) => p.symbol === pair.symbol) || this.isBusy(c.market, mode, pair.symbol)) return this.#skip(pair, setup, id, `There is already an open ${pair.symbol} order or position (from another strategy or placed by hand).`);
     if (this.#todayCount() >= c.maxOrdersPerDay) return this.#skip(pair, setup, id, `Daily limit of ${c.maxOrdersPerDay} automatic orders reached.`, "warn");
 
     let sized;
     try {
       sized = await this.#size(plan, pair.symbol, mode);
     } catch (err) {
-      return this.#note({ type: "error", level: "error", title: `Could not size the order · ${pair.symbol}`, body: err.message, symbol: pair.symbol, market: c.market, interval: pair.interval, signalId: id, external: true });
+      return this.#note({ type: "error", level: "error", title: `${this.strategy.name}: could not size the order · ${pair.symbol}`, body: err.message, symbol: pair.symbol, market: c.market, interval: pair.interval, signalId: id, external: true });
     }
     if (!sized.ok) return this.#skip(pair, setup, id, sized.reason);
 
@@ -369,7 +381,7 @@ export class AutoAmd {
       const blocked = err instanceof RiskBlockedError;
       return this.#note({
         type: blocked ? "skipped" : "error", level: blocked ? "warn" : "error", external: blocked ? c.pushSkips : true,
-        title: blocked ? `Blocked by your risk rules · ${pair.symbol}` : `Order failed · ${pair.symbol} ${pair.interval}`,
+        title: blocked ? `${this.strategy.name}: blocked by your risk rules · ${pair.symbol}` : `${this.strategy.name}: order failed · ${pair.symbol} ${pair.interval}`,
         body: err.message, symbol: pair.symbol, market: c.market, interval: pair.interval, dir: setup.dir, signalId: id,
       });
     }
@@ -379,13 +391,13 @@ export class AutoAmd {
     if (this.day !== day) { this.day = day; this.count = 0; }
     this.count += 1;
     this.pending.push({
-      id: order.id, market: c.market, mode, symbol: pair.symbol, interval: pair.interval, dir: setup.dir, signalId: id,
+      id: order.id, strategy: this.strategy.id, market: c.market, mode, symbol: pair.symbol, interval: pair.interval, dir: setup.dir, signalId: id,
       createdAt: nowMs, expireAt: nowMs + c.expiryCandles * INTERVAL_MS[pair.interval], status: order.status,
     });
     this.#saveState();
     await this.#note({
-      type: "order", level: "success", title: `${plan.side === "long" ? "Buy" : "Sell short"} order placed · ${pair.symbol} ${pair.interval}`,
-      body: `${mode === "live" ? "LIVE" : "Testnet"} · limit ${fmt(plan.entry)}, stop ${fmt(plan.stop)}, target ${fmt(plan.target)} (${plan.rewardRisk.toFixed(1)}R)${sized.note ? ` · ${sized.note}` : ""}. It is cancelled if not filled within ${c.expiryCandles} candles.`,
+      type: "order", level: "success", title: `${this.strategy.name}: ${plan.side === "long" ? "buy" : "sell short"} order placed · ${pair.symbol} ${pair.interval}`,
+      body: `${mode === "live" ? "LIVE" : "Paper"} · limit ${fmt(plan.entry)}, stop ${fmt(plan.stop)}, target ${fmt(plan.target)} (${plan.rewardRisk.toFixed(1)}R)${sized.note ? ` · ${sized.note}` : ""}. It is cancelled if not filled within ${c.expiryCandles} candles.`,
       symbol: pair.symbol, market: c.market, interval: pair.interval, dir: setup.dir, orderId: order.id, signalId: id,
       plan: { side: plan.side, entry: plan.entry, stopLoss: plan.stop, target: plan.target, riskReward: plan.rewardRisk },
     });
@@ -457,4 +469,17 @@ export class AutoAmd {
     this.pending = keep;
     this.#saveState();
   }
+}
+
+/** One trader per strategy, started, stopped and flushed together. */
+export function createBots(strategies, deps) {
+  const traders = new Map(strategies.map((strategy) => [strategy.id, new AutoTrader({ ...deps, strategy })]));
+  return {
+    get: (id) => traders.get(id) ?? null,
+    all: () => [...traders.values()],
+    init: () => Promise.all([...traders.values()].map((t) => t.init())),
+    start: () => traders.forEach((t) => t.start()),
+    stop: () => traders.forEach((t) => t.stop()),
+    flush: () => Promise.all([...traders.values()].map((t) => t.flush())),
+  };
 }

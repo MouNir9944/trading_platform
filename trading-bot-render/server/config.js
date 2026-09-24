@@ -12,10 +12,10 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 
 export const dataPath = (name) => path.join(DATA_DIR, name);
 
-export const MODES = ["testnet", "live"];
+export const MODES = ["paper", "live"];
 
 export function assertMode(mode) {
-  if (!MODES.includes(mode)) throw new Error("Mode must be testnet or live");
+  if (!MODES.includes(mode)) throw new Error("Mode must be paper or live");
   return mode;
 }
 

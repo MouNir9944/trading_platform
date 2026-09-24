@@ -1,12 +1,14 @@
 /**
- * Trading the AMD signal: how a setup becomes an order (entry, stop, target), and a backtest that replays exactly
- * those orders over history. The automatic trader and the backtest both use `planTrade`, so what is tested is what
- * is traded.
+ * Trading a signal, for ANY strategy: how a signal becomes an order (entry, stop, target), and a backtest that replays
+ * exactly those orders over history. The automatic trader, the backtest and the chart all use `planTrade`, so what is
+ * tested is what is traded and what is drawn.
  *
- * Entry modes (both are LIMIT orders placed once the gap has closed):
- *   limit-close  at the close of the gap's third candle (the signal candle)
- *   fvg-retest   at the near edge of the gap itself: a better price and a tighter risk, but price has to come back
- * Target modes:  range = the far side of the accumulation range;  r = a fixed multiple of the risk.
+ * A signal is what a strategy's `detect` returns: { dir: "bull" | "bear", formedAt, entry, stop, target, retest? }.
+ * Entry modes (both are LIMIT orders placed once the signal candle has closed):
+ *   limit-close  at the signal's own entry price (normally the close of the signal candle)
+ *   retest       at the signal's `retest` price (a better price and a tighter risk, but price has to come back);
+ *                only for strategies that give one
+ * Target modes:  own = the strategy's own target;  r = a fixed multiple of the risk.
  *
  * Backtest realism (so results are not flattering):
  *  - the order only exists from the candle AFTER the signal, and lapses after `expiryCandles` candles unfilled;
@@ -17,11 +19,12 @@
  *  - fees are charged on both sides; one position per pair at a time, as the live trader does.
  *  - a trade still open at the end of the data is reported separately and left out of the statistics.
  */
-import { findAmd } from "./amd.js";
 
-export const AMD_TRADE_DEFAULTS = Object.freeze({
+import { detectSignals } from "./index.js";
+
+export const TRADE_DEFAULTS = Object.freeze({
   entryMode: "limit-close",
-  targetMode: "range",
+  targetMode: "own",
   targetR: 2,
   expiryCandles: 3,
   feePercent: 0.05, // per side (futures: 0.02% maker in, 0.05% taker out; spot: 0.1%)
@@ -30,27 +33,32 @@ export const AMD_TRADE_DEFAULTS = Object.freeze({
   shorts: true,
 });
 
-export const ENTRY_MODES = ["limit-close", "fvg-retest"];
-export const TARGET_MODES = ["range", "r"];
+export const ENTRY_MODES = ["limit-close", "retest"];
+export const TARGET_MODES = ["own", "r"];
+
+/** Names saved by earlier versions (the AMD-only bot) still work. */
+export const LEGACY_MODES = { "fvg-retest": "retest", range: "own" };
 
 /**
- * The order for a setup, or `{ ok: false, reason }`. Prices are in real terms (a short has its stop above and its
+ * The order for a signal, or `{ ok: false, reason }`. Prices are in real terms (a short has its stop above and its
  * target below the entry).
  */
-export function planTrade(setup, options = {}) {
-  const o = { ...AMD_TRADE_DEFAULTS, ...options };
-  const long = setup.dir === "bull";
+export function planTrade(signal, options = {}) {
+  const o = { ...TRADE_DEFAULTS, ...options };
+  const long = signal.dir === "bull";
   if (long && !o.longs) return { ok: false, reason: "long trades are switched off" };
   if (!long && !o.shorts) return { ok: false, reason: "short trades are switched off" };
-  const entry = o.entryMode === "fvg-retest" ? (long ? setup.fvg.top : setup.fvg.bottom) : setup.plan.entry;
-  const stop = setup.plan.stopLoss;
+  if (o.entryMode === "retest" && signal.retest == null) return { ok: false, reason: "this signal has no retest price" };
+  const entry = o.entryMode === "retest" ? signal.retest : signal.entry;
+  const stop = signal.stop;
   const risk = long ? entry - stop : stop - entry;
   if (!(risk > 0)) return { ok: false, reason: "the stop is not beyond the entry" };
   let target;
   if (o.targetMode === "r") target = long ? entry + o.targetR * risk : entry - o.targetR * risk;
-  else target = setup.plan.target;
+  else target = signal.target;
+  if (!Number.isFinite(target)) return { ok: false, reason: "the strategy gives no target: use a multiple of the risk" };
   const reward = long ? target - entry : entry - target;
-  if (!(reward > 0)) return { ok: false, reason: "the far side of the range is already behind the entry" };
+  if (!(reward > 0)) return { ok: false, reason: "the target is already behind the entry" };
   const rewardRisk = reward / risk;
   if (o.minRewardRisk > 0 && rewardRisk < o.minRewardRisk - 1e-9) return { ok: false, reason: `reward:risk ${rewardRisk.toFixed(2)} is below ${o.minRewardRisk}` };
   return { ok: true, side: long ? "long" : "short", entry, stop, target, risk, reward, rewardRisk, entryMode: o.entryMode, targetMode: o.targetMode };
@@ -67,18 +75,18 @@ function tradeResult(plan, exit, o) {
 }
 
 /**
- * Replay the signals of one series. `setups` come from `findAmd(candles)`. Only the candles AFTER a signal are
+ * Replay the signals of one series (`detectSignals(strategy, candles, params)`). Only the candles AFTER a signal are
  * used to fill and manage its order.
  */
-export function simulateAmd(candles, setups, options = {}) {
-  const o = { ...AMD_TRADE_DEFAULTS, ...options };
+export function simulate(candles, signals, options = {}) {
+  const o = { ...TRADE_DEFAULTS, ...options };
   const n = candles.length;
   const trades = [];
   const missed = { expired: 0, targetFirst: 0, busy: 0, rejected: 0, offDirection: 0 };
   let free = -1; // index from which a new order may be placed (after the previous trade closed)
   let openTrade = null;
 
-  for (const setup of [...setups].sort((a, b) => a.formedAt - b.formedAt)) {
+  for (const setup of [...signals].sort((a, b) => a.formedAt - b.formedAt)) {
     const plan = planTrade(setup, o);
     if (!plan.ok) {
       if (/switched off/.test(plan.reason)) missed.offDirection += 1; else missed.rejected += 1;
@@ -145,10 +153,8 @@ export function simulateAmd(candles, setups, options = {}) {
     trades.push({ ...base, exitIndex, exitTime: candles[exitIndex].time, exitPrice, reason, barsHeld: exitIndex - fillIndex, ...tradeResult(live, exitPrice, o) });
     free = exitIndex;
   }
-  return { trades, openTrade, missed, signals: setups.length };
+  return { trades, openTrade, missed, signals: signals.length };
 }
-
-const round = (n, d = 2) => (n == null || !Number.isFinite(n) ? null : Math.round(n * 10 ** d) / 10 ** d);
 
 /** Performance of a list of closed trades (oldest first). `riskPerTradePct` drives the compounding equity curve. */
 export function summarizeTrades(trades, { startEquity = 1000, riskPerTradePct = 1 } = {}) {
@@ -208,7 +214,7 @@ export function summarizeTrades(trades, { startEquity = 1000, riskPerTradePct = 
 
 /** A plain-language read of the numbers, with the caveats that matter. */
 export function judgeBacktest(stats) {
-  if (!stats || stats.trades === 0) return { tone: "mixed", label: "No trades", text: "The signal never produced a filled trade in this data. Try more history, another timeframe or looser sensitivity." };
+  if (!stats || stats.trades === 0) return { tone: "mixed", label: "No trades", text: "The strategy never produced a filled trade in this data. Try more history, another timeframe or looser settings." };
   const notes = [];
   if (stats.trades < 30) notes.push(`only ${stats.trades} trades: too few to trust either way`);
   if (stats.halves && Math.sign(stats.halves.first) !== Math.sign(stats.halves.second)) notes.push("the first and second half of the trades disagree, so the result is not stable");
@@ -227,10 +233,11 @@ export function judgeBacktest(stats) {
 }
 
 /**
- * Run the whole thing over several instruments. `datasets` is `[{symbol, candles}]` (oldest first).
+ * Run a strategy over several instruments. `datasets` is `[{symbol, candles}]` (oldest first).
  * Trades of every instrument are pooled for the combined result; instruments are treated as independent.
+ * `detected` (optional) is `Map(symbol -> signals)` to reuse signals already computed.
  */
-export function backtestAmd(datasets, { engine = {}, trade = {}, summary = {} } = {}) {
+export function backtestStrategy(datasets, { strategy, params = {}, trade = {}, summary = {}, detected = null } = {}) {
   const perSymbol = [];
   const all = [];
   let opens = 0;
@@ -238,8 +245,8 @@ export function backtestAmd(datasets, { engine = {}, trade = {}, summary = {} } 
   let signals = 0;
   for (const { symbol, candles } of datasets) {
     if (candles.length < 60) { perSymbol.push({ symbol, candles: candles.length, error: "not enough candles", stats: summarizeTrades([], summary) }); continue; }
-    const setups = findAmd(candles, null, engine);
-    const run = simulateAmd(candles, setups, trade);
+    const found = detected?.get(symbol) ?? detectSignals(strategy, candles, params);
+    const run = simulate(candles, found, trade);
     const tagged = run.trades.map((t) => ({ ...t, symbol }));
     all.push(...tagged);
     if (run.openTrade) opens += 1;
@@ -265,20 +272,24 @@ export function backtestAmd(datasets, { engine = {}, trade = {}, summary = {} } 
     verdict: judgeBacktest(combined),
     trades: [...all].sort((a, b) => b.entryTime - a.entryTime),
     counts: { signals, filled: all.length, open: opens, missed, avgPlannedRewardRisk: all.length ? all.reduce((sum, t) => sum + t.plannedRewardRisk, 0) / all.length : null },
-    options: { engine, trade: { ...AMD_TRADE_DEFAULTS, ...trade }, summary },
+    options: { params, trade: { ...TRADE_DEFAULTS, ...trade }, summary },
   };
 }
 
-/** The same data under several ways of trading the signal, to see which choices matter (in-sample: do not over-trust the best row). */
-export function sweepAmd(datasets, { engine = {}, trade = {}, summary = {} } = {}) {
+/** The same data under several ways of trading the signals, to see which choices matter (in-sample: do not over-trust the best row). */
+export function sweepTrades(datasets, { strategy, params = {}, trade = {}, summary = {} } = {}) {
+  const detected = new Map();
+  for (const { symbol, candles } of datasets) if (candles.length >= 60) detected.set(symbol, detectSignals(strategy, candles, params));
+  const modes = strategy.supportsRetest ? ENTRY_MODES : ["limit-close"];
   const variants = [];
-  for (const entryMode of ENTRY_MODES) {
-    variants.push({ entryMode, targetMode: "range", label: `${entryMode === "limit-close" ? "Enter at the signal close" : "Enter on a retest of the gap"}, target the far side of the range` });
-    for (const targetR of [1.5, 2, 3]) variants.push({ entryMode, targetMode: "r", targetR, label: `${entryMode === "limit-close" ? "Enter at the signal close" : "Enter on a retest of the gap"}, target ${targetR}R` });
+  for (const entryMode of modes) {
+    const how = entryMode === "limit-close" ? "Enter at the signal close" : "Enter on a retest";
+    variants.push({ entryMode, targetMode: "own", label: `${how}, the strategy's own target` });
+    for (const targetR of [1.5, 2, 3]) variants.push({ entryMode, targetMode: "r", targetR, label: `${how}, target ${targetR}R` });
   }
   return variants.map((v) => {
     const { label, ...rest } = v;
-    const result = backtestAmd(datasets, { engine, trade: { ...trade, ...rest }, summary });
+    const result = backtestStrategy(datasets, { strategy, params, trade: { ...trade, ...rest }, summary, detected });
     return { label, trade: rest, stats: result.combined, verdict: result.verdict };
   });
 }

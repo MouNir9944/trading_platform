@@ -5,11 +5,12 @@ import PriceChart from "./components/PriceChart.jsx";
 import AutoOrderPanel from "./components/AutoOrderPanel.jsx";
 import StatsBar from "./components/StatsBar.jsx";
 import MultiChart from "./components/MultiChart.jsx";
-import AmdBotPanel from "./components/AmdBotPanel.jsx";
+import StrategiesPanel from "./components/StrategiesPanel.jsx";
 import NewsPanel from "./components/NewsPanel.jsx";
 import NotificationCenter from "./components/NotificationCenter.jsx";
 import { usePersistentState, oneOf } from "./lib/persist.js";
 import StocksPanel from "./components/StocksPanel.jsx";
+import PerformancePanel from "./components/PerformancePanel.jsx";
 import { getAccountMode, getFuturesAccount, getFuturesOrders, getMarketOverview, getPrice, getRisk, resetRiskDrawdown, updateRisk, getBalance, getBinanceOpenOrders, getCandles, getOrders, getStatus, setAccountMode } from "./api.js";
 
 const DEFAULT_INTERVAL = "5m";
@@ -51,12 +52,20 @@ export default function App() {
   // the chart can tell "a different series" apart from "older history was added".
   const [candlesKey, setCandlesKey] = useState("");
   const [alertPlan, setAlertPlan] = useState(null);
+  // The order ticket currently being set up (entry/stop/target), reported by AutoOrderPanel/FuturesTicket so the
+  // chart can draw it as draggable lines. Dragging one only ever writes back into the ticket's own fields below, so
+  // whatever comes out of it is still checked by the same risk rules as typing the numbers in by hand.
+  const [draftOrder, setDraftOrder] = useState(null);
+  // strategies whose signals are drawn on the trading chart (chosen in the chart's "Strategies" menu or on the Strategies screen)
+  const [chartSettings, setChartSettings] = usePersistentState("pref:chart-strategy-settings", {}, (v) => v && typeof v === "object" && !Array.isArray(v));
+  const [chartStrategies, setChartStrategies] = usePersistentState("pref:chart-strategies", [], (v) => Array.isArray(v) && v.every((x) => typeof x === "string"));
   // "#charts" in the address opens the multi-chart screen directly (used to pop it out into its own browser tab).
   const [view, setView] = useState(() => {
     if (window.location.hash === "#charts") return "charts";
     if (window.location.hash === "#stocks") return "stocks";
     if (window.location.hash === "#news") return "news";
-    if (window.location.hash === "#amd") return "amd";
+    if (window.location.hash === "#strategies" || window.location.hash === "#amd") return "strategies";
+    if (window.location.hash === "#performance") return "performance";
     const saved = readStorage("app-view");
     return saved === "stocks" ? "stocks" : "trading";
   });
@@ -64,7 +73,7 @@ export default function App() {
   const [futuresError, setFuturesError] = useState(null);
   const [refreshMs, setRefreshMs] = usePersistentState("pref:refresh-ms", 15000, oneOf(REFRESH_CHOICES));
   const [connectionOk, setConnectionOk] = useState(null);
-  const [mode, setMode] = useState("testnet");
+  const [mode, setMode] = useState("paper");
   const [error, setError] = useState(null);
   const [storage, setStorage] = useState(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
@@ -154,8 +163,8 @@ export default function App() {
 
   const changeView = (next) => {
     setView(next);
-    try { window.localStorage.setItem("app-view", next === "charts" || next === "news" || next === "amd" ? "trading" : next); } catch { /* storage unavailable */ }
-    try { window.history.replaceState(null, "", next === "charts" || next === "stocks" || next === "news" || next === "amd" ? `#${next}` : `${window.location.pathname}${window.location.search}`); } catch { /* not critical */ }
+    try { window.localStorage.setItem("app-view", next === "charts" || next === "news" || next === "strategies" || next === "performance" ? "trading" : next); } catch { /* storage unavailable */ }
+    try { window.history.replaceState(null, "", next === "charts" || next === "stocks" || next === "news" || next === "strategies" || next === "performance" ? `#${next}` : `${window.location.pathname}${window.location.search}`); } catch { /* not critical */ }
   };
 
   // "Trade" on a multi-chart cell: open that pair, market and timeframe on the trading screen.
@@ -177,15 +186,45 @@ export default function App() {
     setSelectedEntryPrice(null);
     changeView("trading");
     const pct = (delta, base) => Number(((Math.abs(delta) / base) * 100).toFixed(3));
-    // wait for the market switch to settle so the ticket mounts for the right instrument
-    window.setTimeout(() => setAlertPlan({
+    // Applied in the same state update as the market/symbol switch (not delayed): the ticket's own effect turns off
+    // "Auto" risk sizing as soon as it sees this plan, so nothing overwrites it once the pair settles.
+    setAlertPlan({
       nonce: Date.now(),
       symbol: event.symbol,
       side: plan.side ?? (event.dir === "bear" ? "short" : "long"),
       entry: plan.entry,
       stopLossPercent: pct(plan.entry - plan.stopLoss, plan.entry),
       takeProfitPercent: pct(plan.target - plan.entry, plan.entry),
-    }), 700);
+    });
+  };
+
+  // Dragging the entry line, the TP zone or the SL zone on the chart: recompute the percent the ticket actually
+  // uses and hand it to the SAME "apply a plan" pipeline as a notification's "Use in order ticket", so it is
+  // screened by the identical risk checks (server-enforced on submit either way) before anything can be placed.
+  const onDraftDrag = (kind, rawPrice) => {
+    if (!draftOrder || draftOrder.symbol !== symbol || !Number.isFinite(rawPrice) || rawPrice <= 0) return;
+    const { side } = draftOrder;
+    let entry = draftOrder.entry;
+    let stopLoss = draftOrder.stopLoss;
+    let takeProfit = draftOrder.takeProfit;
+    if (kind === "entry") entry = rawPrice;
+    else if (kind === "stop") stopLoss = rawPrice;
+    else if (kind === "target") takeProfit = rawPrice;
+    if (!(entry > 0)) return;
+    const pct = (delta, base) => Number(((Math.abs(delta) / base) * 100).toFixed(3));
+    setAlertPlan({
+      nonce: Date.now(),
+      symbol,
+      side,
+      entry,
+      stopLossPercent: Math.max(0.01, pct(entry - stopLoss, entry)),
+      takeProfitPercent: Math.max(0.01, pct(takeProfit - entry, entry)),
+    });
+  };
+
+  const showStrategyOnChart = (id) => {
+    setChartStrategies((list) => (list.includes(id) ? list : [...list, id]));
+    changeView("trading");
   };
 
   // Spot and futures are separate instrument lists: each remembers its own last pair.
@@ -295,7 +334,8 @@ export default function App() {
     let stopped = false;
 
     function connect() {
-      const streamHost = market === "futures" ? "fstream.binance.com" : mode === "live" ? "stream.binance.com:9443" : "stream.testnet.binance.vision";
+      // Paper mode has no exchange of its own: it streams the real live feed too, same as live trading.
+      const streamHost = market === "futures" ? "fstream.binance.com" : "stream.binance.com:9443";
       stream = new WebSocket(`wss://${streamHost}/ws/${symbol.toLowerCase()}@kline_${interval}`);
       stream.onmessage = (event) => {
         const message = JSON.parse(event.data);
@@ -364,14 +404,14 @@ export default function App() {
     const refreshOrders = () => (market === "futures"
       ? getFuturesOrders(mode).then((managed) => {
         if (!cancelled) {
-          setMode(managed.mode ?? "testnet");
+          setMode(managed.mode ?? "paper");
           setOrders(managed.orders ?? []);
           setBinanceOpenOrders([]);
         }
       })
       : Promise.all([getOrders(mode), getBinanceOpenOrders(undefined, mode)]).then(([managed, open]) => {
         if (!cancelled) {
-          setMode(managed.mode ?? "testnet");
+          setMode(managed.mode ?? "paper");
           setOrders(managed.orders ?? []);
           setBinanceOpenOrders(open.orders ?? []);
         }
@@ -413,7 +453,7 @@ export default function App() {
         onMarketChange={changeMarket}
         view={view}
         onViewChange={changeView}
-        notifications={<NotificationCenter timeZone={timeZone} onUsePlan={useAmdPlan} onOpenSettings={() => changeView("amd")} />}
+        notifications={<NotificationCenter timeZone={timeZone} onUsePlan={useAmdPlan} onOpenSettings={() => changeView("strategies")} />}
         onSymbolChange={(nextSymbol) => {
           setSymbol(nextSymbol);
           setSelectedEntryPrice(null);
@@ -422,7 +462,8 @@ export default function App() {
 
       {view === "stocks" && <StocksPanel />}
       {view === "news" && <NewsPanel timeZone={timeZone} />}
-      {view === "amd" && <AmdBotPanel risk={risk} timeZone={timeZone} />}
+      {view === "strategies" && <StrategiesPanel risk={risk} timeZone={timeZone} chartStrategies={chartStrategies} onShowOnChart={showStrategyOnChart} />}
+      {view === "performance" && <PerformancePanel mode={mode} timeZone={timeZone} />}
       {view === "charts" && <MultiChart mode={mode} timeZone={timeZone} onOpen={openFromCharts} />}
 
       {/* the trading screen stays mounted (chart, indicators) while another view is open */}
@@ -452,6 +493,12 @@ export default function App() {
           candlesKey={candlesKey}
           onLoadOlder={loadOlder}
           onLoadAll={loadAllHistory}
+          strategyIds={chartStrategies}
+          onStrategyIdsChange={setChartStrategies}
+          strategySettings={chartSettings}
+          onStrategySettingsChange={setChartSettings}
+          draft={draftOrder?.symbol === symbol ? draftOrder : null}
+          onDraftDrag={onDraftDrag}
           loadingOlder={loadingOlder}
           timeZone={timeZone}
           tzMode={tzMode}
@@ -462,6 +509,7 @@ export default function App() {
         />
         <AutoOrderPanel
           alertPlan={alertPlan}
+          onDraftChange={setDraftOrder}
           futuresAccount={futuresAccount}
           futuresError={futuresError}
           onFuturesRefresh={refreshFutures}

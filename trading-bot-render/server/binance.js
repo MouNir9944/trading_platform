@@ -1,16 +1,17 @@
 /**
- * Minimal Binance Spot REST client (Testnet or live), with HMAC signing.
+ * Minimal Binance Spot REST client (live), with HMAC signing.
  * Replaces python-binance: only the endpoints this app uses are implemented.
+ * "paper" mode never reaches this client's signed methods - see paperBroker.js.
  */
 import crypto from "node:crypto";
 
 import { assertMode, MODES } from "./config.js";
+import { PaperFuturesClient, PaperSpotClient, initPaperBroker } from "./paperBroker.js";
 
 const BASE_URLS = {
-  testnet: "https://testnet.binance.vision",
   live: "https://api.binance.com",
 };
-const DEFAULT_MODE = (process.env.BINANCE_TESTNET ?? "true").toLowerCase() === "true" ? "testnet" : "live";
+const DEFAULT_MODE = (process.env.BINANCE_TESTNET ?? "true").toLowerCase() === "true" ? "paper" : "live";
 export const DEFAULT_SYMBOL = process.env.TRADING_SYMBOL || "XLMUSDT";
 const REQUEST_TIMEOUT_MS = 30_000;
 const RECV_WINDOW = 10_000;
@@ -26,11 +27,12 @@ export class BinanceError extends Error {
 let currentMode = DEFAULT_MODE;
 let modeStore = null;
 
-/** Load the last saved account mode; call once at startup before serving requests. */
+/** Load the last saved account mode and the paper-trading ledgers; call once at startup before serving requests. */
 export async function initMode(store) {
   modeStore = store;
   const saved = await store.getSetting("account_mode");
   if (MODES.includes(saved)) currentMode = saved;
+  await initPaperBroker(store);
 }
 
 export const getMode = () => currentMode;
@@ -41,18 +43,16 @@ export function setMode(mode) {
   return mode;
 }
 
-export const isTestnet = (mode = getMode()) => mode === "testnet";
+export const isPaper = (mode = getMode()) => mode === "paper";
 
 function credentials(mode) {
   const env = process.env;
-  const [key, secret] = isTestnet(mode)
-    ? [env.BINANCE_API_KEY, env.BINANCE_API_SECRET]
-    : [
-        env.BINANCE_API_KEY_real || env.BINANCE_API_KEY_REAL,
-        env.BINANCE_API_SECRET_real || env.BINANCE_API_SECRET_REAL,
-      ];
+  const [key, secret] = [
+    env.BINANCE_API_KEY_real || env.BINANCE_API_KEY_REAL,
+    env.BINANCE_API_SECRET_real || env.BINANCE_API_SECRET_REAL,
+  ];
   if (!key || !secret) {
-    throw new Error(`Missing Binance ${mode} credentials. Check the matching environment variables.`);
+    throw new Error(`Missing Binance live credentials. Check the matching environment variables.`);
   }
   return { key, secret };
 }
@@ -61,7 +61,7 @@ const clients = new Map();
 
 export function getClient(mode = getMode()) {
   assertMode(mode);
-  if (!clients.has(mode)) clients.set(mode, new BinanceClient(mode));
+  if (!clients.has(mode)) clients.set(mode, isPaper(mode) ? new PaperSpotClient() : new BinanceClient(mode));
   return clients.get(mode);
 }
 
@@ -260,17 +260,15 @@ export class FuturesClient extends BinanceClient {
 }
 
 /**
- * Authenticated USD-M Futures client (Binance futures demo/testnet or live). Only what the trading flow needs.
+ * Authenticated USD-M Futures client (live only - "paper" mode uses PaperFuturesClient instead). Only what
+ * the trading flow needs.
  *
- * Testnet uses the futures demo host and its own API keys (BINANCE_FUTURES_API_KEY / _SECRET): the Spot testnet
- * keys do not work there. Live uses BINANCE_FUTURES_API_KEY_real, falling back to the live Spot key pair when
- * that key has Futures enabled.
+ * Uses BINANCE_FUTURES_API_KEY_real, falling back to the live Spot key pair when that key has Futures enabled.
  *
  * Conditional orders (stop-loss / take-profit) go through Binance's Algo Order endpoints: the regular order
  * endpoint no longer accepts STOP_MARKET / TAKE_PROFIT_MARKET.
  */
 const FUTURES_URLS = {
-  testnet: process.env.BINANCE_FUTURES_TESTNET_URL || "https://demo-fapi.binance.com",
   live: "https://fapi.binance.com",
 };
 
@@ -283,18 +281,12 @@ export class FuturesTradingClient extends BinanceClient {
 
   credentials() {
     const env = process.env;
-    const [key, secret] = isTestnet(this.mode)
-      ? [env.BINANCE_FUTURES_API_KEY, env.BINANCE_FUTURES_API_SECRET]
-      : [
-          env.BINANCE_FUTURES_API_KEY_real || env.BINANCE_API_KEY_real || env.BINANCE_API_KEY_REAL,
-          env.BINANCE_FUTURES_API_SECRET_real || env.BINANCE_API_SECRET_real || env.BINANCE_API_SECRET_REAL,
-        ];
+    const [key, secret] = [
+      env.BINANCE_FUTURES_API_KEY_real || env.BINANCE_API_KEY_real || env.BINANCE_API_KEY_REAL,
+      env.BINANCE_FUTURES_API_SECRET_real || env.BINANCE_API_SECRET_real || env.BINANCE_API_SECRET_REAL,
+    ];
     if (!key || !secret) {
-      throw new Error(
-        isTestnet(this.mode)
-          ? "Missing Binance futures testnet credentials. Set BINANCE_FUTURES_API_KEY and BINANCE_FUTURES_API_SECRET (the Spot testnet keys do not work for futures)."
-          : "Missing Binance live futures credentials. Set BINANCE_FUTURES_API_KEY_real and BINANCE_FUTURES_API_SECRET_real, or enable Futures on your live key.",
-      );
+      throw new Error("Missing Binance live futures credentials. Set BINANCE_FUTURES_API_KEY_real and BINANCE_FUTURES_API_SECRET_real, or enable Futures on your live key.");
     }
     return { key, secret };
   }
@@ -382,7 +374,7 @@ export class FuturesTradingClient extends BinanceClient {
 const futuresTraders = new Map();
 export function getFuturesTrader(mode = getMode()) {
   assertMode(mode);
-  if (!futuresTraders.has(mode)) futuresTraders.set(mode, new FuturesTradingClient(mode));
+  if (!futuresTraders.has(mode)) futuresTraders.set(mode, isPaper(mode) ? new PaperFuturesClient() : new FuturesTradingClient(mode));
   return futuresTraders.get(mode);
 }
 

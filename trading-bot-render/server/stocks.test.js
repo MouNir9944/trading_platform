@@ -4,7 +4,7 @@ import test from "node:test";
 import { createApp } from "./app.js";
 import { OrderManager } from "./orders.js";
 import { FileStore } from "./store.js";
-import { buildEquityOrder, buildPositions, fetchAllTrades, getPortfolio, quotePrice, valuePortfolio } from "./stocks.js";
+import { buildEquityOrder, buildPositions, fetchAllTrades, getPortfolio, quotePrice, realizedTrades, valuePortfolio } from "./stocks.js";
 
 const trade = (symbol, side, qty, price, at, id = `${symbol}-${at}`) => ({ executionId: id, symbol, side, qty: String(qty), price: String(price), executionAt: at });
 
@@ -154,7 +154,7 @@ test("HTTP: portfolio, symbols, order placement with Binance's own checks, cance
     async orderHistory() { return { rows: [] }; },
   };
   const store = new FileStore({ dir: (await import("node:fs")).mkdtempSync((await import("node:path")).join((await import("node:os")).tmpdir(), "stk-")) });
-  const spot = new OrderManager({ getClient: () => ({}), getMode: () => "testnet", getTradingFee: async () => ({}), store });
+  const spot = new OrderManager({ getClient: () => ({}), getMode: () => "paper", getTradingFee: async () => ({}), store });
   await spot.init();
   const yahooFake = { async daily(symbol) { return { symbol, name: `${symbol} Inc.`, candles: [] }; }, async search() { return []; } };
   const { app } = createApp({ orderManager: spot, stocksClient: fake, stockData: yahooFake });
@@ -183,6 +183,11 @@ test("HTTP: portfolio, symbols, order placement with Binance's own checks, cance
 
     const cancelled = await (await fetch(`${base}/stocks/orders/abc`, { method: "DELETE" })).json();
     assert.equal(cancelled.status, "CANCELED");
+
+    const perf = await (await fetch(`${base}/stocks/performance`)).json();
+    assert.equal(perf.tradeCount, trades.length);
+    assert.equal(perf.events.length, 2, "the two GLD sells in the fixture");
+    assert.ok(perf.events[0].time >= perf.events[1].time, "newest first");
   } finally {
     server.close();
   }
@@ -203,4 +208,29 @@ test("order fees are part of the cost, and reduce what a sale earns", () => {
   const split = [{ ...trade("Y", "BUY", 1, 10, 1, "a"), orderId: "s" }, { ...trade("Y", "BUY", 3, 10, 2, "b"), orderId: "s" }];
   const [y] = buildPositions(split, [{ orderId: "s", fee: "0.4" }]);
   assert.ok(Math.abs(y.cost - 40.4) < 1e-9);
+});
+
+test("realizedTrades: one event per sell, in the same average-cost method as buildPositions", () => {
+  const events = realizedTrades(trades); // the GLD/MRVL/MAGS fixture: two GLD sells, everything else is a buy
+  assert.equal(events.length, 2);
+  assert.ok(events.every((e) => e.symbol === "GLD"));
+  const bySymbol = Object.fromEntries(buildPositions(trades).map((p) => [p.symbol, p]));
+  const total = events.reduce((s, e) => s + e.pnl, 0);
+  assert.ok(Math.abs(total - bySymbol.GLD.realized) < 1e-9, "the events sum to the same realized total buildPositions reports");
+  assert.deepEqual(events.map((e) => e.time), [5, 6], "oldest first, matching execution order");
+  assert.equal(events[0].quantity, 0.015);
+
+  // selling everything, then buying again, gives two separate events (not netted against each other)
+  const roundTrip = [trade("X", "BUY", 1, 10, 1), trade("X", "SELL", 1, 15, 2), trade("X", "BUY", 1, 20, 3), trade("X", "SELL", 1, 18, 4)];
+  const xEvents = realizedTrades(roundTrip);
+  assert.equal(xEvents.length, 2);
+  assert.equal(xEvents[0].pnl, 5);
+  assert.equal(xEvents[1].pnl, -2);
+
+  // a fee lowers what the sale earns, split by value like buildPositions
+  const withFee = [{ ...trade("Z", "BUY", 1, 100, 1), orderId: "o1" }, { ...trade("Z", "SELL", 1, 120, 2), orderId: "o2" }];
+  const feeEvents = realizedTrades(withFee, [{ orderId: "o1", fee: "0.5" }, { orderId: "o2", fee: "0.4" }]);
+  assert.ok(Math.abs(feeEvents[0].pnl - (120 - 0.4 - 100.5)) < 1e-9);
+
+  assert.deepEqual(realizedTrades([trade("A", "BUY", 1, 10, 1)]), [], "a position never closed makes no event");
 });

@@ -9,8 +9,9 @@
     "dev:api": "node --env-file-if-exists=.env --watch server/index.js",
     "dev:web": "vite",
     "build": "vite build",
+    "backtest:manipulation": "node scripts/manipulation-backtest.js",
     "start": "node --env-file-if-exists=.env server/index.js",
-    "test": "node --test server/server.test.js server/analysis.test.js server/market.test.js server/risk.test.js server/smc.test.js server/luxsmc.test.js server/amd.test.js server/futures.test.js server/stocks.test.js server/stockanalysis.test.js server/company.test.js server/news.test.js server/amdtrade.test.js server/autobot.test.js server/amdroutes.test.js"
+    "test": "node --test server/server.test.js server/analysis.test.js server/market.test.js server/risk.test.js server/smc.test.js server/luxsmc.test.js server/amd.test.js server/futures.test.js server/paperBroker.test.js server/stocks.test.js server/stockanalysis.test.js server/company.test.js server/news.test.js server/strategies.test.js server/trade.test.js server/autobot.test.js server/strategyroutes.test.js server/volumeprofile.test.js server/manipulation.test.js server/performance.test.js"
   },
   "dependencies": {
     "express": "^4.21.2",

@@ -9,15 +9,17 @@ import {
   createSeriesMarkers,
 } from "lightweight-charts";
 
-import { SESSIONS, dayInfo, sessionSegments, toCandles, tzLabel, zonedParts } from "../../shared/analysis/index.js";
+import { SESSIONS, dailyProfiles, dailySummary, dayInfo, hourlyProfile, peakHourSegments, sessionSegments, toCandles, tzLabel, zonedParts } from "../../shared/analysis/index.js";
 import { TimeBandsPrimitive } from "../lib/timeBands.js";
 import { ZonesPrimitive, buildZoneOverlays } from "../lib/zones.js";
+import { DailyProfilePrimitive } from "../lib/dailyProfile.js";
 import { analyzeLux } from "../../shared/analysis/luxSmc.js";
 import { LUX_SETTINGS_DEFAULTS, buildLuxOverlays, luxCandleColors, luxEngineOptions } from "../lib/luxOverlay.js";
 import LuxSettings from "./LuxSettings.jsx";
-import { findAmd } from "../../shared/analysis/amd.js";
-import { AMD_SETTINGS_DEFAULTS, amdEngineOptions, amdSummary, buildAmdOverlays } from "../lib/amdOverlay.js";
-import AmdSettings from "./AmdSettings.jsx";
+import StrategyMenu from "./StrategyMenu.jsx";
+import { buildStrategyOverlays } from "../lib/strategyOverlay.js";
+import { buildLegend } from "../lib/legend.js";
+import { useKeepOnScreen } from "../lib/useKeepOnScreen.js";
 
 const COLORS = {
   background: "#0f141d",
@@ -38,12 +40,15 @@ const COLORS = {
 const OVERLAY_DEFS = [
   ["days", "Days"],
   ["sessions", "Sessions"],
+  ["peak", "Best hours"],
   ["structure", "Structure"],
   ["fvg", "FVG"],
   ["ob", "Order blocks"],
   ["liq", "Liquidity"],
   ["pd", "Prem/Disc"],
   ["levels", "S/R"],
+  ["dvp", "Daily profile"],
+  ["dvpPrev", "Prior-day POC/VA"],
   ["bb", "BB"],
   ["ema50", "EMA 50"],
   ["rsi", "RSI"],
@@ -51,11 +56,12 @@ const OVERLAY_DEFS = [
 ];
 const OVERLAY_LABELS = Object.fromEntries(OVERLAY_DEFS);
 const INDICATOR_GROUPS = [
-  ["Time", ["days", "sessions"]],
+  ["Time", ["days", "sessions", "peak"]],
   ["Structure and zones", ["structure", "levels", "fvg", "ob", "liq", "pd"]],
+  ["Volume profile", ["dvp", "dvpPrev"]],
   ["Indicators", ["ema50", "bb", "rsi", "macd"]],
 ];
-const DEFAULT_OVERLAYS = { days: true, sessions: false, fvg: true, ob: false, liq: false, pd: false, structure: true, levels: true, bb: false, ema50: false, rsi: false, macd: false };
+const DEFAULT_OVERLAYS = { days: true, sessions: false, peak: false, fvg: true, ob: false, liq: false, pd: false, structure: true, levels: true, bb: false, ema50: false, rsi: false, macd: false, dvp: false, dvpPrev: false };
 const OVERLAY_STORAGE_KEY = "chart-overlays";
 
 function loadOverlays() {
@@ -102,13 +108,19 @@ export default function PriceChart({
   orders,
   binanceOpenOrders = [],
   symbol,
-  mode = "testnet",
+  mode = "paper",
   currentPrice = null,
   analysis = null,
   market = "spot",
   candlesKey = "",
   onLoadOlder = () => {},
   onLoadAll = async () => {},
+  strategyIds = [],
+  strategySettings = {},
+  onStrategySettingsChange = () => {},
+  onStrategyIdsChange = () => {},
+  draft = null,
+  onDraftDrag = () => {},
   loadingOlder = false,
   timeZone = "UTC",
   tzMode = "local",
@@ -137,6 +149,7 @@ export default function PriceChart({
   const markersRef = useRef(null);
   const bandsRef = useRef(null);
   const zonesRef = useRef(null);
+  const dvpRef = useRef(null);
   const bbRef = useRef(null);
   const ema50Ref = useRef(null);
   const rsiRef = useRef(null);
@@ -144,17 +157,16 @@ export default function PriceChart({
   const breakLinesRef = useRef({ key: "", series: [] });
   const levelLinesRef = useRef({ key: "", lines: [] });
   const [overlays, setOverlays] = useState(loadOverlays);
+  const [peakHours, setPeakHours] = useState([]);
   const [lux, setLux] = useState(() => {
     try { return { ...LUX_SETTINGS_DEFAULTS, ...JSON.parse(window.localStorage.getItem("lux-smc") ?? "{}") }; } catch { return { ...LUX_SETTINGS_DEFAULTS }; }
   });
   const [luxOpen, setLuxOpen] = useState(false);
-  const [amd, setAmd] = useState(() => {
-    try { return { ...AMD_SETTINGS_DEFAULTS, ...JSON.parse(window.localStorage.getItem("amd-settings") ?? "{}") }; } catch { return { ...AMD_SETTINGS_DEFAULTS }; }
-  });
-  const [amdOpen, setAmdOpen] = useState(false);
   const [indOpen, setIndOpen] = useState(false);
   const indRef = useRef(null);
-  const activeIndicators = OVERLAY_DEFS.filter(([key]) => overlays[key]).length;
+  const indMenuRef = useRef(null);
+  useKeepOnScreen(indMenuRef, indOpen);
+  const activeIndicators = OVERLAY_DEFS.filter(([key]) => overlays[key]).length + (lux.enabled ? 1 : 0);
 
   // The indicators menu closes on an outside click or Escape.
   useEffect(() => {
@@ -165,15 +177,18 @@ export default function PriceChart({
     return () => { document.removeEventListener("mousedown", close); document.removeEventListener("keydown", close); };
   }, [indOpen]);
 
-  // AMD (accumulation, manipulation, FVG, distribution) on the last 2000 candles, only while switched on.
-  const amdEngineKey = JSON.stringify(amdEngineOptions(amd));
-  const amdCandles = useMemo(() => (amd.enabled ? toCandles(candles.slice(-2000)) : null), [candles, amd.enabled]);
-  const amdSetups = useMemo(
-    () => (amdCandles && amdCandles.length >= 30 ? findAmd(amdCandles, null, amdEngineOptions(amd)) : null),
+  // Signals of the strategies ticked in the "Strategies" menu (any strategy of the platform), on the last 2000 candles.
+  const stratCandles = useMemo(() => (strategyIds.length ? toCandles(candles.slice(-2000)) : null), [candles, strategyIds.length]);
+  const strategyKey = `${strategyIds.join(",")}|${JSON.stringify(strategyIds.map((id) => strategySettings[id] ?? null))}`;
+  const stratOverlay = useMemo(
+    () => (stratCandles ? buildStrategyOverlays(strategyIds, stratCandles, { market, settings: strategySettings }) : { zones: [], lines: [], labels: [], summary: [] }),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [amdCandles, amdEngineKey],
+    [stratCandles, strategyKey, market],
   );
-  const amdStatus = useMemo(() => (amd.enabled && amdSetups ? amdSummary(amdSetups, amdCandles, amd) : null), [amd, amdSetups, amdCandles]);
+  // Daily volume profile. Rebuilt on every candle update so the live day keeps filling in.
+  const dvpOn = overlays.dvp || overlays.dvpPrev;
+  const dvp = useMemo(() => (dvpOn ? dailyProfiles(toCandles(candles), timeZone) : null), [dvpOn, candles, timeZone]);
+  const dvpSummary = useMemo(() => (dvp?.supported ? dailySummary(dvp.days, currentPrice ?? Number(candles[candles.length - 1]?.[4])) : null), [dvp, currentPrice, candles]);
 
   // LuxAlgo-style smart money analysis on (up to) the last 2000 candles. Recomputed as candles arrive, but only
   // while the overlay is on, and re-derived from scratch when an engine setting changes.
@@ -184,13 +199,33 @@ export default function PriceChart({
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [luxCandles, luxEngineKey],
   );
+
+  // The "Legend" panel below the chart: abbreviations and a live read, for whatever is currently switched on.
+  const [legendOpen, setLegendOpen] = useState(() => {
+    try { return JSON.parse(window.localStorage.getItem("chart-legend-open") ?? "true"); } catch { return true; }
+  });
+  useEffect(() => {
+    try { window.localStorage.setItem("chart-legend-open", JSON.stringify(legendOpen)); } catch { /* storage unavailable */ }
+  }, [legendOpen]);
+  const legend = useMemo(
+    () => buildLegend({ overlays, lux, analysis, luxResult, strategyIds, stratOverlay, dvpSummary, timeZone, formatPrice }),
+    [overlays, lux, analysis, luxResult, strategyIds, stratOverlay, dvpSummary, timeZone],
+  );
+
   const [positionBoxes, setPositionBoxes] = useState([]);
   const [accountMarkers, setAccountMarkers] = useState([]);
   const [livePnlMarkers, setLivePnlMarkers] = useState([]);
+  const dragKindRef = useRef(null);
+  const dragRafRef = useRef(null);
+  const dragPriceRef = useRef(null);
   onPriceSelectRef.current = onPriceSelect;
   onLoadOlderRef.current = onLoadOlder;
 
-  const positions = useMemo(() => buildPositions(orders, symbol, mode), [orders, symbol, mode]);
+  const positions = useMemo(() => {
+    const real = buildPositions(orders, symbol, mode);
+    const draftPosition = buildDraftPosition(draft, symbol, candles);
+    return draftPosition ? [...real, draftPosition] : real;
+  }, [orders, symbol, mode, draft, candles]);
   const accountOrders = useMemo(
     () => (binanceOpenOrders ?? []).filter((order) => order.symbol === symbol),
     [binanceOpenOrders, symbol],
@@ -213,6 +248,9 @@ export default function PriceChart({
         fontFamily: "JetBrains Mono",
         fontSize: 12,
       },
+      // 5 decimals on the price (Y) axis, the crosshair and price lines: enough for a low-priced pair like XRP,
+      // where the default 2 decimals hide the difference between price levels.
+      localization: { priceFormatter: (price) => price.toFixed(5) },
       grid: {
         vertLines: { color: COLORS.grid },
         horzLines: { color: COLORS.grid },
@@ -238,6 +276,7 @@ export default function PriceChart({
       priceLineColor: COLORS.maFast,
       priceLineVisible: true,
       lastValueVisible: true,
+      priceFormat: { type: "price", precision: 5, minMove: 0.00001 },
       // Auto-scale to the visible candles AND any order levels (entry / stop-loss / take-profit).
       autoscaleInfoProvider: (baseImplementation) => {
         const base = baseImplementation();
@@ -277,6 +316,9 @@ export default function PriceChart({
     // Smart-money zones (FVG, order blocks, premium/discount, liquidity) are drawn behind the candles too.
     zonesRef.current = new ZonesPrimitive(candleSeries);
     chart.panes()[0].attachPrimitive(zonesRef.current);
+    // Daily volume profile: histogram, POC / value area, and the previous day's levels.
+    dvpRef.current = new DailyProfilePrimitive(candleSeries);
+    chart.panes()[0].attachPrimitive(dvpRef.current);
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
     fastSeriesRef.current = fastSeries;
@@ -378,23 +420,22 @@ export default function PriceChart({
     try { window.localStorage.setItem("lux-smc", JSON.stringify(lux)); } catch { /* storage unavailable */ }
   }, [lux]);
 
-  useEffect(() => {
-    try { window.localStorage.setItem("amd-settings", JSON.stringify(amd)); } catch { /* storage unavailable */ }
-  }, [amd]);
-
   // Smart-money zones follow the analysis and the overlay toggles (our own FVG / OB / liquidity / premium-discount
   // plus, when switched on, the LuxAlgo-style overlay).
   useEffect(() => {
     if (!zonesRef.current) return;
     const base = buildZoneOverlays(analysis, overlays);
     const extra = lux.enabled && luxResult ? buildLuxOverlays(luxResult, luxCandles, lux) : { zones: [], lines: [], labels: [] };
-    const amdExtra = amd.enabled && amdSetups ? buildAmdOverlays(amdSetups, amdCandles, amd) : { zones: [], lines: [], labels: [] };
     zonesRef.current.set({
-      zones: [...base.zones, ...extra.zones, ...amdExtra.zones],
-      lines: [...base.lines, ...extra.lines, ...amdExtra.lines],
-      labels: [...extra.labels, ...amdExtra.labels],
+      zones: [...base.zones, ...extra.zones, ...stratOverlay.zones],
+      lines: [...base.lines, ...extra.lines, ...stratOverlay.lines],
+      labels: [...extra.labels, ...stratOverlay.labels],
     });
-  }, [analysis, overlays.fvg, overlays.ob, overlays.liq, overlays.pd, luxResult, luxCandles, lux, amdSetups, amdCandles, amd]);
+  }, [analysis, overlays.fvg, overlays.ob, overlays.liq, overlays.pd, luxResult, luxCandles, lux, stratOverlay]);
+
+  useEffect(() => {
+    dvpRef.current?.set({ days: dvp?.supported ? dvp.days : [], showProfile: overlays.dvp, showPrev: overlays.dvpPrev });
+  }, [dvp, overlays.dvp, overlays.dvpPrev]);
 
   // Show chart times in the chosen timezone instead of UTC.
   useEffect(() => {
@@ -409,15 +450,19 @@ export default function PriceChart({
   useEffect(() => {
     if (!bandsRef.current) return;
     const list = toCandles(candles);
+    const top = overlays.peak && list.length >= 48 ? hourlyProfile(list, timeZone).top : [];
+    setPeakHours(top);
     bandsRef.current.set({
       days: dayInfo(list, timeZone),
       times: list.map((c) => c.time),
       sessions: overlays.sessions ? sessionSegments(list) : [],
+      peak: top.length ? peakHourSegments(list, timeZone, top) : [],
       showDays: overlays.days,
       showSessions: overlays.sessions,
+      showPeak: overlays.peak,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [timesKey, timeZone, overlays.days, overlays.sessions]);
+  }, [timesKey, timeZone, overlays.days, overlays.sessions, overlays.peak]);
 
 
   useEffect(() => {
@@ -575,6 +620,9 @@ export default function PriceChart({
     orderLinesRef.current = [];
 
     positions.forEach((position) => {
+      // The draggable draft already shows its own entry/stop/target on its box (with drag handles); a second,
+      // separately-updating native price line for the same levels only doubles up and ghosts while dragging.
+      if (position.draggable) return;
       const color = position.preview ? "#8aa0bf" : COLORS.up;
       [
         [position.entry, "Entry", color],
@@ -654,6 +702,9 @@ export default function PriceChart({
         return {
           id: position.id,
           preview: position.preview,
+          draggable: Boolean(position.draggable),
+          blocked: Boolean(position.blocked),
+          side: position.side,
           status: position.status,
           left: range.left,
           width: range.width,
@@ -709,8 +760,50 @@ export default function PriceChart({
     };
   }, [positions, candles, interval, symbol, accountOrderLevels, currentPrice]);
 
-  const accountLabel = mode === "live" ? "Live" : "Testnet";
+  const accountLabel = mode === "live" ? "Live" : "Paper";
   const futures = market === "futures";
+
+  // Dragging the draft box's entry line, TP zone or SL zone: convert the pointer's Y position to a price and hand it
+  // to the ticket (which turns "Auto" off and re-checks the risk rules, exactly like typing the number in by hand).
+  function priceAtClientY(clientY) {
+    const series = candleSeriesRef.current;
+    const container = containerRef.current;
+    if (!series || !container) return null;
+    const price = series.coordinateToPrice(clientY - container.getBoundingClientRect().top);
+    return price != null && Number.isFinite(price) && price > 0 ? Number(price) : null;
+  }
+  function beginDrag(kind) {
+    return (event) => {
+      if (event.button != null && event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      dragKindRef.current = kind;
+      try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* not supported */ }
+    };
+  }
+  function onDragMove(event) {
+    if (!dragKindRef.current) return;
+    const price = priceAtClientY(event.clientY);
+    if (price == null) return;
+    dragPriceRef.current = price;
+    if (dragRafRef.current != null) return;
+    dragRafRef.current = window.requestAnimationFrame(() => {
+      dragRafRef.current = null;
+      if (dragKindRef.current && dragPriceRef.current != null) onDraftDrag(dragKindRef.current, dragPriceRef.current);
+    });
+  }
+  function endDrag(event) {
+    if (!dragKindRef.current) return;
+    // Apply the last position even if the throttled frame for it hasn't painted yet, so a fast release never loses it.
+    if (dragRafRef.current != null) {
+      window.cancelAnimationFrame(dragRafRef.current);
+      dragRafRef.current = null;
+    }
+    if (dragPriceRef.current != null) onDraftDrag(dragKindRef.current, dragPriceRef.current);
+    dragKindRef.current = null;
+    dragPriceRef.current = null;
+    try { event.currentTarget.releasePointerCapture(event.pointerId); } catch { /* already released */ }
+  }
 
   return (
     <div className={`panel chart-panel${fullscreen ? " is-fullscreen" : ""}`}>
@@ -725,7 +818,17 @@ export default function PriceChart({
             Indicators{activeIndicators ? ` · ${activeIndicators}` : ""} <span aria-hidden="true">▾</span>
           </button>
           {indOpen && (
-            <div className="ind-menu" role="group" aria-label="Chart overlays">
+            <div className="ind-menu" role="group" aria-label="Chart overlays" ref={indMenuRef}>
+              <div className="ind-group">
+                <h5>Smart money (LuxAlgo)</h5>
+                <div className="ind-item-row">
+                  <label className="ind-item" title="Smart Money Concepts in the style of the LuxAlgo indicator: structure, order blocks, EQH/EQL, gaps, zones">
+                    <input type="checkbox" checked={lux.enabled} onChange={() => setLux((v) => ({ ...v, enabled: !v.enabled }))} />
+                    <span>SMC (LuxAlgo)</span>
+                  </label>
+                  <button type="button" className={`strat-gear${luxOpen ? " is-on" : ""}`} aria-label="SMC (LuxAlgo) settings" aria-expanded={luxOpen} onClick={() => { setLuxOpen((v) => !v); setIndOpen(false); }} title="Settings">⚙</button>
+                </div>
+              </div>
               {INDICATOR_GROUPS.map(([title, keys]) => (
                 <div key={title} className="ind-group">
                   <h5>{title}</h5>
@@ -740,32 +843,29 @@ export default function PriceChart({
             </div>
           )}
         </div>
-        <div className="lux-toggle">
-          <button type="button" className={lux.enabled ? "is-on" : ""} aria-pressed={lux.enabled} onClick={() => setLux((v) => ({ ...v, enabled: !v.enabled }))} title="Smart Money Concepts in the style of the LuxAlgo indicator: structure, order blocks, EQH/EQL, gaps, zones">SMC (LuxAlgo)</button>
-          <button type="button" className={luxOpen ? "is-on" : ""} aria-label="SMC settings" onClick={() => setLuxOpen((v) => !v)} title="SMC settings">⚙</button>
-        </div>
         {luxOpen && <LuxSettings settings={lux} onChange={setLux} onClose={() => setLuxOpen(false)} />}
-        <div className="lux-toggle">
-          <button type="button" className={amd.enabled ? "is-on" : ""} aria-pressed={amd.enabled} onClick={() => setAmd((v) => ({ ...v, enabled: !v.enabled }))} title="Accumulation, Manipulation, FVG, Distribution: shown only when they form in that order">AMD</button>
-          <button type="button" className={amdOpen ? "is-on" : ""} aria-label="AMD settings" onClick={() => setAmdOpen((v) => !v)} title="AMD settings">⚙</button>
-        </div>
-        {amdOpen && <AmdSettings settings={amd} onChange={setAmd} onClose={() => setAmdOpen(false)} />}
-        {amd.enabled && (
-          <div className="amd-status" title="Newest AMD setup on the chart">
-            {amdStatus ? (
+        <StrategyMenu selected={strategyIds} onChange={onStrategyIdsChange} settings={strategySettings} onSettingsChange={onStrategySettingsChange} summary={stratOverlay.summary} />
+        {dvpOn && (
+          <div className="vp-status" title="Daily volume profile: where volume traded today and yesterday. POC = busiest price, VA = the range holding 70% of volume">
+            {!dvp?.supported ? <span>Daily profile needs a 4h or faster timeframe</span> : !dvpSummary?.today && !dvpSummary?.prev ? <span>Daily profile: not enough candles loaded</span> : (
               <>
-                <b className={amdStatus.dir === "bull" ? "up" : "down"}>{amdStatus.dir === "bull" ? "▲ Bullish" : "▼ Bearish"}</b>
-                {amdStatus.stages.map((st) => (
-                  <span key={st.key} className={`amd-stage is-${st.state}`}>{st.label[0]} {st.state === "done" ? "✓" : st.state === "failed" ? "✗" : "…"}</span>
-                ))}
-                <em>{amdStatus.status === "active" ? `${Math.round(amdStatus.progress * 100)}% to target` : amdStatus.status === "distributed" ? "distributed" : "failed"}</em>
+                {dvpSummary.today && <span>Today POC <b>{formatPrice(dvpSummary.today.poc)}</b> · VA {formatPrice(dvpSummary.today.val)}–{formatPrice(dvpSummary.today.vah)}</span>}
+                {dvpSummary.prev && dvpSummary.today && <span>Prev POC <b>{formatPrice(dvpSummary.prev.poc)}</b> · VA {formatPrice(dvpSummary.prev.val)}–{formatPrice(dvpSummary.prev.vah)}</span>}
+                {dvpSummary.prev && <em className={`is-${dvpSummary.vsPrev}`}>{dvpSummary.vsPrev === "inside" ? "inside" : dvpSummary.vsPrev} prior value</em>}
               </>
-            ) : <span>AMD: no complete sequence in view</span>}
+            )}
           </div>
         )}
         {overlays.sessions && (
           <div className="session-legend">
             {SESSIONS.map((s) => <span key={s.id}><i style={{ background: s.color }} />{s.name}</span>)}
+          </div>
+        )}
+        {overlays.peak && (
+          <div className="session-legend peak-legend" title="Hours with the highest average volume over the candles currently loaded">
+            <span><i className="peak-swatch" />
+              {peakHours.length ? `Best hours (${tzLabel(timeZone)}): ${peakHours.map((h) => `${String(h).padStart(2, "0")}:00`).join(", ")}` : "Load more history to find the busiest hours"}
+            </span>
           </div>
         )}
         <div className="chart-legend">
@@ -808,28 +908,35 @@ export default function PriceChart({
         <div ref={containerRef} className="candle-chart-wrap" />
         <div className="long-position-layer" aria-hidden="true">
           {positionBoxes.map((box) => (
-            <div key={box.id} className={`long-position-box${box.preview ? " is-preview" : ""}`} style={{ left: box.left, width: box.width }}>
+            <div key={box.id} className={`long-position-box${box.preview ? " is-preview" : ""}${box.draggable ? " is-draggable" : ""}${box.blocked ? " is-blocked" : ""}`} style={{ left: box.left, width: box.width }}>
               <div
-                className="long-position-tp"
+                className={`long-position-tp${box.draggable ? " is-draggable" : ""}`}
                 style={{ top: Math.min(box.takeY, box.entryY), height: Math.abs(box.entryY - box.takeY) }}
+                {...(box.draggable ? { onPointerDown: beginDrag("target"), onPointerMove: onDragMove, onPointerUp: endDrag, onPointerCancel: endDrag, title: "Drag to move the take-profit" } : {})}
               >
-                <span>Take Profit</span>
+                <span>{box.draggable ? "⋮⋮ " : ""}Take Profit</span>
                 <strong>{formatPrice(box.takeProfit)}</strong>
                 <em className="pnl-positive">{formatPnl(box.targetPnl)}</em>
               </div>
-              <div className="long-position-entry" style={{ top: box.entryY }}>
-                <span>Entry</span>
+              <div
+                className={`long-position-entry${box.draggable ? " is-draggable" : ""}`}
+                style={{ top: box.entryY }}
+                {...(box.draggable ? { onPointerDown: beginDrag("entry"), onPointerMove: onDragMove, onPointerUp: endDrag, onPointerCancel: endDrag, title: "Drag to move the entry" } : {})}
+              >
+                <span>{box.draggable ? "⋮⋮ " : ""}Entry</span>
                 <strong>{formatPrice(box.entry)}</strong>
                 {box.rr > 0 && <em>1 : {box.rr.toFixed(1)}</em>}
               </div>
               <div
-                className="long-position-sl"
+                className={`long-position-sl${box.draggable ? " is-draggable" : ""}`}
                 style={{ top: Math.min(box.entryY, box.stopY), height: Math.abs(box.stopY - box.entryY) }}
+                {...(box.draggable ? { onPointerDown: beginDrag("stop"), onPointerMove: onDragMove, onPointerUp: endDrag, onPointerCancel: endDrag, title: "Drag to move the stop-loss" } : {})}
               >
-                <span>Stop Loss</span>
+                <span>{box.draggable ? "⋮⋮ " : ""}Stop Loss</span>
                 <strong>{formatPrice(box.stopLoss)}</strong>
                 <em className="pnl-negative">{formatPnl(box.stopPnl)}</em>
               </div>
+              {box.blocked && <div className="long-position-blocked">Blocked by risk rules</div>}
             </div>
           ))}
           {livePnlMarkers.map((marker) => (
@@ -851,6 +958,32 @@ export default function PriceChart({
         </div>
       </div>
       {candles.length === 0 && !loading && <div className="chart-empty">No candle data for this pair and timeframe.</div>}
+      <div className="chart-key">
+        <button type="button" className="chart-key-head" aria-expanded={legendOpen} onClick={() => setLegendOpen((v) => !v)}>
+          <span>Legend{legend.length ? ` · ${legend.length}` : ""}</span>
+          <span aria-hidden="true">{legendOpen ? "▾" : "▸"}</span>
+        </button>
+        {legendOpen && (
+          legend.length === 0 ? (
+            <p className="chart-key-empty">Turn on an indicator or tick a strategy to see what its abbreviations mean and a live read of the chart here.</p>
+          ) : (
+            <div className="chart-key-list">
+              {legend.map((section) => (
+                <div className="chart-key-section" key={section.key}>
+                  <div className="chart-key-title">
+                    {section.color && <i style={{ background: section.color }} aria-hidden="true" />}
+                    <b>{section.title}</b>
+                  </div>
+                  <p className="chart-key-abbrevs">
+                    {section.abbrevs.map(([code, meaning]) => <span key={code}><b>{code}</b> {meaning}</span>)}
+                  </p>
+                  <p className="chart-key-text">{section.text}</p>
+                </div>
+              ))}
+            </div>
+          )
+        )}
+      </div>
     </div>
   );
 }
@@ -872,6 +1005,31 @@ function buildPositions(orders, symbol, mode) {
       preview: false,
     }))
     .filter((order) => order.entry > 0 && order.stopLoss > 0 && order.takeProfit > 0 && (order.side === "short" ? order.takeProfit < order.entry && order.entry < order.stopLoss : order.stopLoss < order.entry && order.entry < order.takeProfit));
+}
+
+/**
+ * The order ticket being set up right now, as a draggable "position" the existing box-drawing code already knows
+ * how to draw. Anchored to the LAST candle (not some span of candles further back), so `positionBoxRange` draws it
+ * entirely in the empty space to the right of price action — it never sits over, or hides, any actual candle.
+ */
+function buildDraftPosition(draft, symbol, candles) {
+  if (!draft || draft.symbol !== symbol) return null;
+  const entry = Number(draft.entry);
+  const stopLoss = Number(draft.stopLoss);
+  const takeProfit = Number(draft.takeProfit);
+  const side = draft.side === "short" ? "short" : "long";
+  const ok = entry > 0 && stopLoss > 0 && takeProfit > 0
+    && (side === "short" ? takeProfit < entry && entry < stopLoss : stopLoss < entry && entry < takeProfit);
+  if (!ok || !candles?.length) return null;
+  const createdAtMs = Number(candles[candles.length - 1]?.[0]);
+  if (!Number.isFinite(createdAtMs)) return null;
+  return {
+    id: "draft", symbol, entry, stopLoss, takeProfit,
+    quantity: Number(draft.quantity) || 0,
+    feePercent: Number(draft.feePercent) || 0.1,
+    side, status: "DRAFT", createdAt: new Date(createdAtMs).toISOString(),
+    preview: true, draggable: true, blocked: Boolean(draft.blocked),
+  };
 }
 
 function extractOrderLevels(order, positions) {
@@ -994,6 +1152,8 @@ function boxesEqual(left, right) {
     const other = right[index];
     return item.id === other.id
       && item.preview === other.preview
+      && item.draggable === other.draggable
+      && item.blocked === other.blocked
       && item.left === other.left
       && item.width === other.width
       && item.entryY === other.entryY

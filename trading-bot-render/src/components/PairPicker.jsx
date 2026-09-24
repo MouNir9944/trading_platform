@@ -187,7 +187,6 @@ export default function PairPicker({ symbol, price, priceDirection, overview, ma
             {overview
               ? <>
                   {futures ? "Live Binance USD-M futures market data" : overview.source === "live" ? "Live Binance market data" : "This account's market data (live data unavailable)"}
-                  {!futures && overview.mode === "testnet" && overview.source === "live" ? ", listing only pairs available on Testnet" : ""}
                   {overview.marketCapAvailable ? " · market caps from CoinGecko" : " · market caps unavailable right now"}
                   {" · "}Updated {new Date(overview.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.
                 </>

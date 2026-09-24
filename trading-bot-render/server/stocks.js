@@ -1,6 +1,6 @@
 /**
  * Binance Stocks (US-listed stocks and ETFs): a separate product from Spot, with its own API under
- * /sapi/v1/equity/*. It exists on the LIVE account only (there is no testnet), so this always uses the live keys.
+ * /sapi/v1/equity/*. It exists on the LIVE account only (there is no paper trading for it), so this always uses the live keys.
  *
  * Binance offers quotes, orders and trade history but NO holdings endpoint, so the portfolio is rebuilt from the
  * account's executed trades (average-cost method) and valued at the live bid. Things that change a position
@@ -120,6 +120,36 @@ export function buildPositions(trades, orders = []) {
     bySymbol.set(t.symbol, p);
   }
   return [...bySymbol.values()].map((p) => ({ ...p, avgCost: p.quantity > 0 ? p.cost / p.quantity : null }));
+}
+
+/**
+ * Realized profit/loss events, one per SELL trade, in the same average-cost method as `buildPositions` — but as a
+ * time-ordered stream instead of a per-symbol total, so the Performance tab can bucket it into days and months.
+ */
+export function realizedTrades(trades, orders = []) {
+  const bySymbol = new Map();
+  const feeOf = feeShares(trades, orders);
+  const events = [];
+  for (const t of [...trades].sort((a, b) => Number(a.executionAt) - Number(b.executionAt))) {
+    const qty = Number(t.qty);
+    const price = Number(t.price);
+    if (!(qty > 0) || !(price > 0)) continue;
+    const fee = feeOf(t);
+    const p = bySymbol.get(t.symbol) ?? { quantity: 0, cost: 0 };
+    if (t.side === "BUY") {
+      p.quantity += qty;
+      p.cost += qty * price + fee;
+    } else {
+      const average = p.quantity > 0 ? p.cost / p.quantity : price;
+      const sold = Math.min(qty, p.quantity);
+      events.push({ time: Number(t.executionAt), symbol: t.symbol, pnl: price * sold - fee - average * sold, quantity: sold, price });
+      p.cost -= average * sold;
+      p.quantity -= sold;
+    }
+    if (p.quantity < DUST) { p.quantity = 0; p.cost = 0; }
+    bySymbol.set(t.symbol, p);
+  }
+  return events;
 }
 
 /** The price a holding can be sold at now: the bid. Falls back to the ask, then to nothing. */
