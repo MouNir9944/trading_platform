@@ -316,7 +316,10 @@ select:focus-visible {
   .trading-workspace > .chart-panel,
   .trading-workspace > .automation-panel {
     height: 100%;
-    min-height: 0;
+    /* Below this, the chart toolbar/legend/candles no longer fit and (with overflow:hidden) just get clipped
+       with no way to reach them. A real minimum lets the page itself grow past 100vh and scroll instead -
+       the case that hits this: the browser zoomed in enough that 100vh no longer has room to spare. */
+    min-height: 520px;
   }
 
   .trading-workspace > .automation-panel { overflow-y: auto; }
