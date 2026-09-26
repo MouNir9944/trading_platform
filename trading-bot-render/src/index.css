@@ -479,6 +479,17 @@ select:focus-visible {
   z-index: 3;
 }
 
+/* Only captures the mouse while a draw tool is selected, so panning/zooming/crosshair/click-to-set-entry keep
+   working exactly as before whenever the cursor tool is active (the default). */
+.draw-overlay {
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+  touch-action: none;
+  z-index: 4;
+}
+.draw-overlay.is-active { cursor: crosshair; pointer-events: auto; }
+
 .long-position-box {
   border-left: 1px solid rgba(255, 255, 255, 0.35);
   bottom: 0;
@@ -529,6 +540,14 @@ select:focus-visible {
   font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 600;
+}
+
+.long-position-tp strong small,
+.long-position-sl strong small,
+.long-position-entry strong small {
+  font-size: 10px;
+  font-weight: 500;
+  opacity: 0.75;
 }
 
 .long-position-entry {
@@ -655,6 +674,25 @@ select:focus-visible {
 
 .account-order-marker span { font-size: 10px; letter-spacing: 0.02em; text-transform: uppercase; }
 .account-order-marker strong { font-family: var(--font-mono); font-size: 11px; }
+.account-order-marker strong small { font-size: 10px; font-weight: 500; opacity: 0.8; }
+
+/* Replaces the chart library's own crosshair price label (hidden in the chart options) with one that also
+   carries the % away from the current price - sits in the same spot, over the price axis. */
+.crosshair-price-tag {
+  background: #4c8dff;
+  border-radius: 3px;
+  color: #fff;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 6px;
+  position: absolute;
+  right: 1px;
+  transform: translateY(-50%);
+  white-space: nowrap;
+  z-index: 5;
+}
+.crosshair-price-tag small { font-size: 10px; font-weight: 500; opacity: 0.85; }
 
 .chart-empty {
   align-items: center;
@@ -1306,6 +1344,8 @@ select:focus-visible {
 .mini-button:hover:not(:disabled) { border-color: var(--accent); color: var(--text-primary); }
 .mini-button:disabled { cursor: wait; opacity: 0.6; }
 .mini-button.accent { background: rgba(91, 156, 255, 0.12); border-color: rgba(91, 156, 255, 0.4); color: var(--accent); }
+.mini-button.danger { background: rgba(238, 106, 88, 0.1); border-color: rgba(238, 106, 88, 0.4); color: var(--sell); }
+.mini-button.danger:hover:not(:disabled) { background: rgba(238, 106, 88, 0.18); border-color: var(--sell); color: #fff; }
 
 .backtest { border-top: 1px dashed var(--border); margin-top: 10px; padding-top: 8px; }
 
@@ -1986,6 +2026,8 @@ button.pm-row:hover { background: var(--surface-2); }
 .chart-controls { flex-wrap: wrap; justify-content: flex-end; order: 2; }
 .toolbar-break { flex-basis: 100%; height: 0; order: 3; }
 .ind-menu-wrap { order: 4; position: relative; }
+.draw-tools { order: 4; }
+.draw-menu-wrap { order: 4; position: relative; }
 .chart-toolbar .vp-status { order: 6; }
 .chart-toolbar .session-legend { order: 7; }
 .chart-toolbar .chart-legend { margin-left: auto; order: 8; }
@@ -2023,6 +2065,13 @@ button.pm-row:hover { background: var(--surface-2); }
 .ind-item { align-items: center; color: var(--text-muted); display: flex; font-size: 12px; gap: 7px; }
 .ind-item input { accent-color: #4c8dff; }
 .ind-item-row { align-items: center; display: flex; gap: 6px; grid-column: 1 / -1; justify-content: space-between; }
+
+.draw-menu { min-width: 220px; }
+.draw-list { display: flex; flex-direction: column; gap: 2px; list-style: none; margin: 0; max-height: 260px; overflow-y: auto; padding: 0; }
+.draw-list li { align-items: center; border-radius: 6px; color: var(--text-muted); display: flex; font-size: 12px; justify-content: space-between; padding: 5px 6px; }
+.draw-list li:hover { background: var(--surface-2); color: var(--text-primary); }
+.draw-remove { border-radius: 4px; color: var(--text-faint); font-size: 15px; line-height: 1; padding: 1px 6px; }
+.draw-remove:hover { background: rgba(238, 106, 88, 0.18); color: var(--sell); }
 
 /* ---- Multi-chart screen ---- */
 
@@ -2267,7 +2316,9 @@ button.mini-symbol:hover, button.mini-symbol[aria-expanded="true"] { border-colo
 /* ---- Notification center ---- */
 
 .amd-toast.is-warn { border-left-color: var(--hold); }
-.notif-wrap { position: relative; }
+.notif-wrap { order: 99; position: relative; }
+/* The bell is the last item of the status row, and the row hugs the header's right edge: bell in the right corner. */
+.header .status-row { margin-left: auto; }
 .notif-bell { align-items: center; background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; color: var(--text-primary); cursor: pointer; display: inline-flex; font-size: 14px; gap: 5px; height: 30px; padding: 0 10px; }
 .notif-bell:hover { border-color: var(--accent); }
 .notif-bell.has-unread { border-color: var(--buy); }

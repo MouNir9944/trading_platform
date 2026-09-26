@@ -1,0 +1,26 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file: .env            # copy .env.example to .env first; never baked into the image
+    environment:
+      NODE_ENV: production
+      MONGODB_URI: mongodb://mongo:27017/   # overrides any localhost URI from .env
+      MONGODB_DB: trading_bot
+      DATA_DIR: /data
+    volumes:
+      - app-data:/data
+    depends_on:
+      - mongo
+    restart: unless-stopped
+
+  mongo:
+    image: mongo:7
+    volumes:
+      - mongo-data:/data/db
+    restart: unless-stopped
+
+volumes:
+  app-data:
+  mongo-data:

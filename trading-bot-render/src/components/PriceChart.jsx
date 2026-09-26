@@ -13,6 +13,7 @@ import { SESSIONS, dailyProfiles, dailySummary, dayInfo, hourlyProfile, peakHour
 import { TimeBandsPrimitive } from "../lib/timeBands.js";
 import { ZonesPrimitive, buildZoneOverlays } from "../lib/zones.js";
 import { DailyProfilePrimitive } from "../lib/dailyProfile.js";
+import { DrawingsPrimitive, drawingLabel } from "../lib/drawings.js";
 import { analyzeLux } from "../../shared/analysis/luxSmc.js";
 import { LUX_SETTINGS_DEFAULTS, buildLuxOverlays, luxCandleColors, luxEngineOptions } from "../lib/luxOverlay.js";
 import LuxSettings from "./LuxSettings.jsx";
@@ -215,11 +216,116 @@ export default function PriceChart({
   const [positionBoxes, setPositionBoxes] = useState([]);
   const [accountMarkers, setAccountMarkers] = useState([]);
   const [livePnlMarkers, setLivePnlMarkers] = useState([]);
+  const [crosshair, setCrosshair] = useState(null); // {price, y} of whatever the pointer is over right now
   const dragKindRef = useRef(null);
   const dragRafRef = useRef(null);
   const dragPriceRef = useRef(null);
   onPriceSelectRef.current = onPriceSelect;
   onLoadOlderRef.current = onLoadOlder;
+
+  // ---- trader drawings: trendlines, horizontal lines, rectangles, drawn straight on the chart ----
+  const drawingsRef = useRef(null); // the DrawingsPrimitive instance
+  const drawOverlayRef = useRef(null);
+  const [drawTool, setDrawTool] = useState("cursor"); // "cursor" | "trendline" | "horizontal" | "rectangle"
+  const [drawings, setDrawings] = useState([]);
+  const [drawDraft, setDrawDraft] = useState(null); // the shape being dragged out right now
+  const [drawMenuOpen, setDrawMenuOpen] = useState(false);
+  const drawMenuWrapRef = useRef(null); // wraps the toggle button + menu, for outside-click detection
+  const drawMenuRef = useRef(null); // the menu panel itself, for useKeepOnScreen
+  const drawStartRef = useRef(null); // {time, price} of the first point of the shape being drawn
+  useKeepOnScreen(drawMenuRef, drawMenuOpen);
+  const drawingsKey = `chart-drawings:${market}:${symbol}`;
+
+  // Drawings are per pair: reload whenever the pair (or market) changes.
+  useEffect(() => {
+    let loaded = [];
+    try {
+      const raw = window.localStorage.getItem(drawingsKey);
+      if (raw) loaded = JSON.parse(raw);
+    } catch { /* storage unavailable or corrupted */ }
+    setDrawings(Array.isArray(loaded) ? loaded : []);
+    setDrawDraft(null);
+    setDrawTool("cursor");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drawingsKey]);
+
+  useEffect(() => {
+    try { window.localStorage.setItem(drawingsKey, JSON.stringify(drawings)); } catch { /* storage unavailable */ }
+  }, [drawingsKey, drawings]);
+
+  // The drawings menu closes on an outside click or Escape.
+  useEffect(() => {
+    if (!drawMenuOpen) return undefined;
+    const close = (event) => { if (event.type === "keydown" ? event.key === "Escape" : !drawMenuWrapRef.current?.contains(event.target)) setDrawMenuOpen(false); };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", close);
+    return () => { document.removeEventListener("mousedown", close); document.removeEventListener("keydown", close); };
+  }, [drawMenuOpen]);
+
+  // A tool other than the cursor takes over the mouse (so a drag draws a shape instead of panning the chart).
+  useEffect(() => {
+    chartRef.current?.applyOptions({
+      handleScroll: drawTool === "cursor",
+      handleScale: drawTool === "cursor",
+    });
+  }, [drawTool]);
+
+  function pointAtClient(clientX, clientY) {
+    const chart = chartRef.current;
+    const series = candleSeriesRef.current;
+    const container = containerRef.current;
+    if (!chart || !series || !container) return null;
+    const rect = container.getBoundingClientRect();
+    const time = chart.timeScale().coordinateToTime(clientX - rect.left);
+    const price = series.coordinateToPrice(clientY - rect.top);
+    if (time == null || price == null || !Number.isFinite(price)) return null;
+    return { time, price: Number(price) };
+  }
+
+  function addDrawing(shape) {
+    setDrawings((previous) => [...previous, { ...shape, id: `d${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}` }]);
+  }
+
+  function removeDrawing(id) {
+    setDrawings((previous) => previous.filter((d) => d.id !== id));
+  }
+
+  function beginDraw(event) {
+    if (drawTool === "cursor" || event.button !== 0) return;
+    event.preventDefault();
+    const point = pointAtClient(event.clientX, event.clientY);
+    if (!point) return;
+    try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* not supported */ }
+    if (drawTool === "horizontal") {
+      addDrawing({ type: "horizontal", p: point.price });
+      return; // one click is enough; the tool stays selected so the next click adds another
+    }
+    drawStartRef.current = point;
+    setDrawDraft({ type: drawTool, t1: point.time, p1: point.price, t2: point.time, p2: point.price });
+  }
+
+  function onDrawMove(event) {
+    if (!drawStartRef.current) return;
+    const point = pointAtClient(event.clientX, event.clientY);
+    if (!point) return;
+    setDrawDraft({ type: drawTool, t1: drawStartRef.current.time, p1: drawStartRef.current.price, t2: point.time, p2: point.price });
+  }
+
+  useEffect(() => {
+    drawingsRef.current?.set({ drawings, draft: drawDraft, currentPrice });
+  }, [drawings, drawDraft, currentPrice]);
+
+  function endDraw(event) {
+    if (!drawStartRef.current) return;
+    const point = pointAtClient(event.clientX, event.clientY) ?? drawStartRef.current;
+    const start = drawStartRef.current;
+    drawStartRef.current = null;
+    setDrawDraft(null);
+    try { event.currentTarget.releasePointerCapture(event.pointerId); } catch { /* already released */ }
+    // A click with no real drag isn't a useful trendline/rectangle; drop it rather than add a zero-size shape.
+    if (start.time === point.time && start.price === point.price) return;
+    addDrawing({ type: drawTool, t1: start.time, p1: start.price, t2: point.time, p2: point.price });
+  }
 
   const positions = useMemo(() => {
     const real = buildPositions(orders, symbol, mode);
@@ -258,7 +364,9 @@ export default function PriceChart({
       crosshair: {
         mode: CrosshairMode.Normal,
         vertLine: { color: "#a8b3c7", width: 1, style: 2, labelBackgroundColor: "#4c8dff" },
-        horzLine: { color: "#a8b3c7", width: 1, style: 2, labelBackgroundColor: "#4c8dff" },
+        // Its price label is replaced by a custom one (below) that adds the % from the current price;
+        // the dotted line itself stays.
+        horzLine: { color: "#a8b3c7", width: 1, style: 2, labelVisible: false },
       },
       rightPriceScale: { borderColor: COLORS.border, scaleMargins: { top: 0.08, bottom: 0.2 } },
       timeScale: { borderColor: COLORS.border, timeVisible: true, secondsVisible: false, rightOffset: 5, barSpacing: 8, minBarSpacing: 2 },
@@ -309,6 +417,18 @@ export default function PriceChart({
       if (price != null && Number.isFinite(price)) onPriceSelectRef.current(Number(price));
     });
 
+    // Replaces the crosshair's own price label (hidden above) with one that also shows the % away from the
+    // current price - the whole point of pointing at a price on the chart is usually "how far is that from here".
+    chart.subscribeCrosshairMove((param) => {
+      if (!param.point || (param.paneIndex != null && param.paneIndex !== 0)) {
+        setCrosshair(null);
+        return;
+      }
+      const price = candleSeries.coordinateToPrice(param.point.y);
+      if (price == null || !Number.isFinite(price)) { setCrosshair(null); return; }
+      setCrosshair({ price: Number(price), y: param.point.y });
+    });
+
     markersRef.current = createSeriesMarkers(candleSeries, []);
     bandsRef.current = new TimeBandsPrimitive();
     // Pane-level primitive: drawn behind the grid and candles.
@@ -319,6 +439,9 @@ export default function PriceChart({
     // Daily volume profile: histogram, POC / value area, and the previous day's levels.
     dvpRef.current = new DailyProfilePrimitive(candleSeries);
     chart.panes()[0].attachPrimitive(dvpRef.current);
+    // Trader-drawn trendlines, horizontal lines and rectangles: drawn on top, above the candles.
+    drawingsRef.current = new DrawingsPrimitive(candleSeries);
+    chart.panes()[0].attachPrimitive(drawingsRef.current);
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
     fastSeriesRef.current = fastSeries;
@@ -635,7 +758,10 @@ export default function PriceChart({
           color: lineColor,
           lineWidth: position.preview ? 1 : 2,
           lineStyle: 2,
-          axisLabelVisible: true,
+          // The order box already shows this price with its % from the current price and its P&L; a second,
+          // plain (no-%) price on the axis from this native line would just be a redundant, less useful copy.
+          // The dashed line itself stays, so the level is still visible even when scrolled away from the box.
+          axisLabelVisible: false,
           title,
         });
         orderLinesRef.current.push({ series: candleSeriesRef.current, line });
@@ -648,7 +774,9 @@ export default function PriceChart({
         color,
         lineWidth: 2,
         lineStyle: 0,
-        axisLabelVisible: true,
+        // Its own marker (left edge of the chart) shows this price with its % from the current price; skip the
+        // plain (no-%) copy the axis would otherwise show.
+        axisLabelVisible: false,
         title,
       });
       orderLinesRef.current.push({ series: candleSeriesRef.current, line });
@@ -845,6 +973,30 @@ export default function PriceChart({
         </div>
         {luxOpen && <LuxSettings settings={lux} onChange={setLux} onClose={() => setLuxOpen(false)} />}
         <StrategyMenu selected={strategyIds} onChange={onStrategyIdsChange} settings={strategySettings} onSettingsChange={onStrategySettingsChange} summary={stratOverlay.summary} />
+        <div className="segmented segmented-small draw-tools" role="group" aria-label="Draw on the chart">
+          <button type="button" className={drawTool === "cursor" ? "is-active" : ""} onClick={() => setDrawTool("cursor")} title="Cursor: pan and zoom the chart as usual">Cursor</button>
+          <button type="button" className={drawTool === "trendline" ? "is-active" : ""} onClick={() => setDrawTool("trendline")} title="Trendline: drag from one point to another">⟋ Line</button>
+          <button type="button" className={drawTool === "horizontal" ? "is-active" : ""} onClick={() => setDrawTool("horizontal")} title="Horizontal line: click a price to mark a level">— Level</button>
+          <button type="button" className={drawTool === "rectangle" ? "is-active" : ""} onClick={() => setDrawTool("rectangle")} title="Rectangle: drag to mark a zone">▭ Zone</button>
+        </div>
+        <div className="draw-menu-wrap" ref={drawMenuWrapRef}>
+          <button type="button" className={`ind-button${drawings.length ? " is-on" : ""}`} aria-expanded={drawMenuOpen} onClick={() => setDrawMenuOpen((v) => !v)} disabled={!drawings.length} title="Your drawings on this pair">
+            Drawings{drawings.length ? ` · ${drawings.length}` : ""} <span aria-hidden="true">▾</span>
+          </button>
+          {drawMenuOpen && drawings.length > 0 && (
+            <div className="ind-menu draw-menu" role="group" aria-label="Your drawings" ref={drawMenuRef}>
+              <ul className="draw-list">
+                {drawings.map((shape) => (
+                  <li key={shape.id}>
+                    <span>{drawingLabel(shape)}</span>
+                    <button type="button" className="draw-remove" aria-label={`Delete ${drawingLabel(shape)}`} onClick={() => removeDrawing(shape.id)}>×</button>
+                  </li>
+                ))}
+              </ul>
+              <button type="button" className="mini-button danger" onClick={() => { setDrawings([]); setDrawMenuOpen(false); }}>Clear all</button>
+            </div>
+          )}
+        </div>
         {dvpOn && (
           <div className="vp-status" title="Daily volume profile: where volume traded today and yesterday. POC = busiest price, VA = the range holding 70% of volume">
             {!dvp?.supported ? <span>Daily profile needs a 4h or faster timeframe</span> : !dvpSummary?.today && !dvpSummary?.prev ? <span>Daily profile: not enough candles loaded</span> : (
@@ -906,6 +1058,14 @@ export default function PriceChart({
       </div>
       <div className="candle-chart-shell">
         <div ref={containerRef} className="candle-chart-wrap" />
+        <div
+          ref={drawOverlayRef}
+          className={`draw-overlay${drawTool !== "cursor" ? " is-active" : ""}`}
+          onPointerDown={beginDraw}
+          onPointerMove={onDrawMove}
+          onPointerUp={endDraw}
+          onPointerCancel={endDraw}
+        />
         <div className="long-position-layer" aria-hidden="true">
           {positionBoxes.map((box) => (
             <div key={box.id} className={`long-position-box${box.preview ? " is-preview" : ""}${box.draggable ? " is-draggable" : ""}${box.blocked ? " is-blocked" : ""}`} style={{ left: box.left, width: box.width }}>
@@ -915,7 +1075,7 @@ export default function PriceChart({
                 {...(box.draggable ? { onPointerDown: beginDrag("target"), onPointerMove: onDragMove, onPointerUp: endDrag, onPointerCancel: endDrag, title: "Drag to move the take-profit" } : {})}
               >
                 <span>{box.draggable ? "⋮⋮ " : ""}Take Profit</span>
-                <strong>{formatPrice(box.takeProfit)}</strong>
+                <strong>{formatPrice(box.takeProfit)} <small>{formatPct(box.takeProfit, box.markPrice)}</small></strong>
                 <em className="pnl-positive">{formatPnl(box.targetPnl)}</em>
               </div>
               <div
@@ -924,7 +1084,7 @@ export default function PriceChart({
                 {...(box.draggable ? { onPointerDown: beginDrag("entry"), onPointerMove: onDragMove, onPointerUp: endDrag, onPointerCancel: endDrag, title: "Drag to move the entry" } : {})}
               >
                 <span>{box.draggable ? "⋮⋮ " : ""}Entry</span>
-                <strong>{formatPrice(box.entry)}</strong>
+                <strong>{formatPrice(box.entry)} <small>{formatPct(box.entry, box.markPrice)}</small></strong>
                 {box.rr > 0 && <em>1 : {box.rr.toFixed(1)}</em>}
               </div>
               <div
@@ -933,7 +1093,7 @@ export default function PriceChart({
                 {...(box.draggable ? { onPointerDown: beginDrag("stop"), onPointerMove: onDragMove, onPointerUp: endDrag, onPointerCancel: endDrag, title: "Drag to move the stop-loss" } : {})}
               >
                 <span>{box.draggable ? "⋮⋮ " : ""}Stop Loss</span>
-                <strong>{formatPrice(box.stopLoss)}</strong>
+                <strong>{formatPrice(box.stopLoss)} <small>{formatPct(box.stopLoss, box.markPrice)}</small></strong>
                 <em className="pnl-negative">{formatPnl(box.stopPnl)}</em>
               </div>
               {box.blocked && <div className="long-position-blocked">Blocked by risk rules</div>}
@@ -952,9 +1112,14 @@ export default function PriceChart({
           {accountMarkers.map((level) => (
             <div key={level.id} className={`account-order-marker ${level.side === "BUY" ? "is-buy" : "is-sell"}`} style={{ top: level.y }}>
               <span>{level.title}</span>
-              <strong>{formatPrice(level.price)}</strong>
+              <strong>{formatPrice(level.price)} <small>{formatPct(level.price, currentPrice)}</small></strong>
             </div>
           ))}
+          {crosshair && (
+            <div className="crosshair-price-tag" style={{ top: crosshair.y }}>
+              {formatPrice(crosshair.price)} <small>{formatPct(crosshair.price, currentPrice)}</small>
+            </div>
+          )}
         </div>
       </div>
       {candles.length === 0 && !loading && <div className="chart-empty">No candle data for this pair and timeframe.</div>}
@@ -1095,6 +1260,13 @@ function formatPnl(value) {
   const digits = abs >= 10 ? 2 : abs >= 1 ? 3 : 4;
   const formatted = abs.toFixed(digits);
   return `${value >= 0 ? "+" : "-"}${formatted} USDT`;
+}
+
+/** How far `price` sits from `base` (usually the current price), as a signed percentage. */
+function formatPct(price, base) {
+  if (!Number.isFinite(price) || !Number.isFinite(base) || base <= 0) return null;
+  const pct = ((price - base) / base) * 100;
+  return `${pct >= 0 ? "+" : ""}${pct.toFixed(2)}%`;
 }
 
 function toChartTime(value) {
