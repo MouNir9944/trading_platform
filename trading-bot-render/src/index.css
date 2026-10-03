@@ -1555,6 +1555,95 @@ button.chip:hover { border-color: var(--accent); }
 
 .pm-head input:focus { border-color: var(--accent); outline: none; }
 
+/* ---- Favorites (quick-pick pairs, with a note each) ---- */
+
+.pair-fav-toggle {
+  background: transparent;
+  border: 0;
+  color: var(--text-faint);
+  font-size: 15px;
+  line-height: 1;
+  padding: 2px;
+}
+.pair-fav-toggle:hover { color: var(--hold); }
+.pair-fav-toggle.is-on { color: var(--hold); }
+
+.pm-star {
+  background: transparent;
+  border: 0;
+  color: var(--text-faint);
+  flex: none;
+  font-size: 14px;
+  line-height: 1;
+  padding: 2px;
+}
+.pm-star:hover { color: var(--hold); }
+.pm-star.is-on { color: var(--hold); }
+.pm-best-card .pm-star { position: absolute; right: 8px; top: 8px; }
+
+.pm-favorites { margin-bottom: 10px; }
+.pm-favorites h4 { color: var(--text-muted); font-size: 11px; font-weight: 600; letter-spacing: 0.04em; margin: 8px 0 8px; text-transform: uppercase; }
+
+.pm-fav-list { display: flex; flex-direction: column; gap: 4px; }
+
+.pm-fav-row {
+  align-items: center;
+  background: rgba(224, 170, 72, 0.06);
+  border: 1px solid rgba(224, 170, 72, 0.2);
+  border-radius: 8px;
+  display: flex;
+  gap: 8px;
+  padding: 5px 8px;
+}
+
+.pm-fav-pick {
+  align-items: baseline;
+  background: transparent;
+  border: 0;
+  color: var(--text-primary);
+  display: flex;
+  flex: none;
+  gap: 5px;
+}
+.pm-fav-pick strong { font-size: 13px; font-weight: 650; }
+.pm-fav-pick strong em { color: var(--text-faint); font-style: normal; font-weight: 500; }
+
+.pm-fav-note {
+  background: transparent;
+  border: 0;
+  color: var(--text-faint);
+  flex: 1;
+  font-size: 12px;
+  overflow: hidden;
+  padding: 3px 6px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pm-fav-note:hover { color: var(--text-muted); }
+
+.pm-fav-note-input {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text-primary);
+  flex: 1;
+  font-size: 12px;
+  min-width: 0;
+  padding: 3px 6px;
+}
+.pm-fav-note-input:focus { border-color: var(--accent); outline: none; }
+
+.pm-fav-remove {
+  background: transparent;
+  border: 0;
+  color: var(--text-faint);
+  flex: none;
+  font-size: 12px;
+  padding: 2px 4px;
+}
+.pm-fav-remove:hover { color: var(--sell); }
+
 .pm-best h4 { color: var(--text-muted); font-size: 11px; font-weight: 600; letter-spacing: 0.04em; margin: 0 0 8px; text-transform: uppercase; }
 .pm-best-grid { display: grid; gap: 8px; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 12px; }
 
@@ -1564,10 +1653,12 @@ button.chip:hover { border-color: var(--accent); }
   border: 1px solid rgba(53, 196, 140, 0.25);
   border-radius: 10px;
   color: var(--text-primary);
+  cursor: pointer;
   display: grid;
   gap: 2px 8px;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto 1fr auto auto;
   padding: 9px 11px;
+  position: relative;
   text-align: left;
 }
 
@@ -1588,13 +1679,14 @@ button.chip:hover { border-color: var(--accent); }
   display: grid;
   font-size: 12px;
   gap: 8px;
-  grid-template-columns: 1.25fr 1fr 0.75fr 0.9fr 1.5fr 1.05fr 0.6fr;
+  grid-template-columns: 1.25fr 1fr 0.75fr 0.9fr 1.5fr 1.05fr 0.6fr auto;
   padding: 7px 8px;
   text-align: left;
   width: 100%;
 }
 
-button.pm-row:hover { background: var(--surface-2); }
+.pm-row:hover { background: var(--surface-2); cursor: pointer; }
+.pm-row.pm-header:hover { background: var(--surface); cursor: default; }
 .pm-row.is-current { background: rgba(91, 156, 255, 0.1); box-shadow: inset 2px 0 0 var(--accent); }
 
 .pm-header {
@@ -1640,7 +1732,7 @@ button.pm-row:hover { background: var(--surface-2); }
   .pair-menu { left: 3vw; overflow-y: auto; transform: none; }
   .pm-table { overflow: visible; }
   .pm-best-grid { grid-template-columns: 1fr; }
-  .pm-row { grid-template-columns: 1.2fr 1fr 0.8fr 1.3fr 0.6fr; }
+  .pm-row { grid-template-columns: 1.2fr 1fr 0.8fr 1.3fr 0.6fr auto; }
   .pm-row > :nth-child(4), .pm-row > :nth-child(6) { display: none; }
 }
 
@@ -2114,6 +2206,15 @@ button.pm-row:hover { background: var(--surface-2); }
 .mini-pick { position: relative; }
 button.mini-symbol { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text-primary); cursor: pointer; font-family: var(--font-mono); font-size: 12px; font-weight: 600; padding: 3px 9px; width: auto; }
 button.mini-symbol:hover, button.mini-symbol[aria-expanded="true"] { border-color: var(--accent); }
+
+/* Per-mini-chart indicators/strategies/drawing toolbar. Deliberately its own class names rather than
+   reusing .ind-menu-wrap/.draw-tools/.draw-menu-wrap, which carry an unscoped `order: 4` meant for the
+   main chart's toolbar layout. */
+.mini-toolbar-row { align-items: center; border-top: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 6px; padding: 5px 8px; }
+.mini-ind-wrap, .mini-strat-wrap, .mini-draw-menu-wrap { position: relative; }
+.mini-draw-tools { margin-left: auto; }
+.strat-menu { min-width: 200px; }
+.strat-dot { border-radius: 50%; display: inline-block; flex-shrink: 0; height: 8px; width: 8px; }
 
 .chart-pair-menu {
   background: var(--surface);

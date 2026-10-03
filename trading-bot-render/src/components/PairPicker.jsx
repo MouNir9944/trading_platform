@@ -31,6 +31,10 @@ const SORT_FNS = {
   change24h: (a, b) => b.change24h - a.change24h,
 };
 
+const FAVORITES_KEY = "pref:favorite-pairs";
+const isFavoritesShape = (v) => Boolean(v) && typeof v === "object" && !Array.isArray(v);
+const favoriteKey = (m, s) => `${m}:${s}`;
+
 /**
  * Pair selector for the header. Opens a searchable table that compares every tradable pair:
  * price, 24h move, volume, market cap (with a bar and "× bigger/smaller than the current pair"),
@@ -41,6 +45,9 @@ export default function PairPicker({ symbol, price, priceDirection, overview, ma
   const [query, setQuery] = useState("");
   const [sort, setSort] = usePersistentState("pref:pair-picker-sort", "score", oneOf(Object.keys(SORT_FNS)));
   const [category, setCategory] = usePersistentState("pref:pair-picker-category", "all", oneOf(CATEGORY_CHIPS.map(([id]) => id)));
+  const [favorites, setFavorites] = usePersistentState(FAVORITES_KEY, {}, isFavoritesShape);
+  const [editingNote, setEditingNote] = useState(null); // favorite key currently being annotated
+  const [noteDraft, setNoteDraft] = useState("");
   const rootRef = useRef(null);
   const searchRef = useRef(null);
 
@@ -82,6 +89,32 @@ export default function PairPicker({ symbol, price, priceDirection, overview, ma
     if (next !== symbol) onSelect(next);
   };
 
+  const favoriteList = useMemo(() => Object.values(favorites).sort((a, b) => b.addedAt - a.addedAt), [favorites]);
+  const isFavorite = (m, s) => Boolean(favorites[favoriteKey(m, s)]);
+  const toggleFavorite = (m, s) => {
+    const key = favoriteKey(m, s);
+    setFavorites((previous) => {
+      if (previous[key]) {
+        const next = { ...previous };
+        delete next[key];
+        return next;
+      }
+      return { ...previous, [key]: { market: m, symbol: s, note: "", addedAt: Date.now() } };
+    });
+  };
+  const pickFavorite = (fav) => {
+    setOpen(false);
+    setQuery("");
+    if (fav.market !== market) onMarketChange(fav.market);
+    onSelect(fav.symbol);
+  };
+  const startNote = (fav) => { setEditingNote(favoriteKey(fav.market, fav.symbol)); setNoteDraft(fav.note ?? ""); };
+  const saveNote = (fav) => {
+    const key = favoriteKey(fav.market, fav.symbol);
+    setFavorites((previous) => (previous[key] ? { ...previous, [key]: { ...previous[key], note: noteDraft.trim() } } : previous));
+    setEditingNote(null);
+  };
+
   return (
     <div className="pair-picker" ref={rootRef}>
       <div className="pair-block">
@@ -92,6 +125,15 @@ export default function PairPicker({ symbol, price, priceDirection, overview, ma
           <span className="chev" aria-hidden="true">▾</span>
         </button>
         <span className={`pair-price ${priceDirection ? `tick-${priceDirection}` : ""}`}>{price != null ? formatPrice(price) : "—"}</span>
+        <button
+          type="button"
+          className={`pair-fav-toggle${isFavorite(market, symbol) ? " is-on" : ""}`}
+          onClick={() => toggleFavorite(market, symbol)}
+          title={isFavorite(market, symbol) ? "Remove from favorites" : "Add to favorites"}
+          aria-pressed={isFavorite(market, symbol)}
+        >
+          {isFavorite(market, symbol) ? "★" : "☆"}
+        </button>
       </div>
 
       {current && (
@@ -112,6 +154,43 @@ export default function PairPicker({ symbol, price, priceDirection, overview, ma
             <button type="button" role="tab" aria-selected={!futures} className={!futures ? "is-active" : ""} onClick={() => onMarketChange("spot")}>Spot <small>tradable</small></button>
             <button type="button" role="tab" aria-selected={futures} className={futures ? "is-active" : ""} onClick={() => onMarketChange("futures")}>Futures <small>leverage</small></button>
           </div>
+
+          {favoriteList.length > 0 && (
+            <div className="pm-favorites">
+              <h4>★ Favorites</h4>
+              <div className="pm-fav-list">
+                {favoriteList.map((fav) => {
+                  const key = favoriteKey(fav.market, fav.symbol);
+                  const [favBase] = splitPair(fav.symbol);
+                  return (
+                    <div key={key} className="pm-fav-row">
+                      <button type="button" className="pm-fav-pick" onClick={() => pickFavorite(fav)} title={`Switch to ${fav.symbol} (${fav.market})`}>
+                        <strong>{favBase}<em>/{splitPair(fav.symbol)[1]}</em></strong>
+                        {fav.market === "futures" && <i className="cat-badge cat-perp">PERP</i>}
+                      </button>
+                      {editingNote === key ? (
+                        <input
+                          className="pm-fav-note-input"
+                          autoFocus
+                          value={noteDraft}
+                          onChange={(e) => setNoteDraft(e.target.value)}
+                          onBlur={() => saveNote(fav)}
+                          onKeyDown={(e) => { if (e.key === "Enter") saveNote(fav); if (e.key === "Escape") setEditingNote(null); }}
+                          placeholder="Note to self…"
+                        />
+                      ) : (
+                        <button type="button" className="pm-fav-note" onClick={() => startNote(fav)} title="Click to edit this note">
+                          {fav.note || "+ add a note"}
+                        </button>
+                      )}
+                      <button type="button" className="pm-fav-remove" onClick={() => toggleFavorite(fav.market, fav.symbol)} title="Remove from favorites">✕</button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {rows.length > 0 && (
             <div className="pm-cats" role="group" aria-label="Asset class">
               {CATEGORY_CHIPS.filter(([key]) => key === "all" || counts[key]).map(([key, label]) => (
@@ -138,12 +217,20 @@ export default function PairPicker({ symbol, price, priceDirection, overview, ma
               <h4>{category === "all" ? "Best pairs to trade right now" : `Best ${categoryLabel(category).toLowerCase()} to trade right now`}</h4>
               <div className="pm-best-grid">
                 {best.map((r, i) => (
-                  <button key={r.symbol} type="button" className="pm-best-card" onClick={() => pick(r.symbol)}>
+                  <div key={r.symbol} role="button" tabIndex={0} className="pm-best-card" onClick={() => pick(r.symbol)} onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") pick(r.symbol); }}>
                     <span className="pm-rank">#{i + 1}</span>
                     <strong>{r.base}<em>/USDT</em></strong>
                     <span className={`score-pill ${scoreTone(r.score)}`}>{r.score}</span>
                     <small>{r.reasons[0] ?? "Balanced liquidity and range"}</small>
-                  </button>
+                    <button
+                      type="button"
+                      className={`pm-star${isFavorite(market, r.symbol) ? " is-on" : ""}`}
+                      onClick={(e) => { e.stopPropagation(); toggleFavorite(market, r.symbol); }}
+                      title={isFavorite(market, r.symbol) ? "Remove from favorites" : "Add to favorites"}
+                    >
+                      {isFavorite(market, r.symbol) ? "★" : "☆"}
+                    </button>
+                  </div>
                 ))}
               </div>
             </div>
@@ -152,19 +239,20 @@ export default function PairPicker({ symbol, price, priceDirection, overview, ma
           {overview && (
             <div className="pm-table" role="listbox" aria-label="Pairs">
               <div className="pm-row pm-header" aria-hidden="true">
-                <span>Pair</span><span>Price</span><span>24h</span><span>Volume</span><span>Market cap</span><span>vs {base}</span><span>Score</span>
+                <span>Pair</span><span>Price</span><span>24h</span><span>Volume</span><span>Market cap</span><span>vs {base}</span><span>Score</span><span />
               </div>
               {visible.length === 0 && <p className="pm-empty">No pair matches “{query}”.</p>}
               {visible.map((r) => {
                 const ratio = r.symbol === symbol ? null : capRatio(r.marketCap, current?.marketCap);
                 return (
-                  <button
+                  <div
                     key={r.symbol}
-                    type="button"
                     role="option"
+                    tabIndex={0}
                     aria-selected={r.symbol === symbol}
                     className={`pm-row ${r.symbol === symbol ? "is-current" : ""}`}
                     onClick={() => pick(r.symbol)}
+                    onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") pick(r.symbol); }}
                     title={[...r.reasons, ...r.warnings].join(" · ") || undefined}
                   >
                     <span className="pm-pair">{r.base}<em>/USDT</em>{r.category !== "crypto" && <i className={`cat-badge cat-${r.category}`}>{categoryLabel(r.category)}</i>}</span>
@@ -177,7 +265,15 @@ export default function PairPicker({ symbol, price, priceDirection, overview, ma
                     </span>
                     <span className={`pm-ratio ${ratio ? `tag-${ratio.tone}` : ""}`}>{r.symbol === symbol ? "current" : ratio ? ratio.text : "—"}</span>
                     <span>{r.score == null ? <em className="pm-na" title="Too little trading volume to score">n/a</em> : <b className={`score-pill ${scoreTone(r.score)}`}>{r.score}</b>}</span>
-                  </button>
+                    <button
+                      type="button"
+                      className={`pm-star${isFavorite(market, r.symbol) ? " is-on" : ""}`}
+                      onClick={(e) => { e.stopPropagation(); toggleFavorite(market, r.symbol); }}
+                      title={isFavorite(market, r.symbol) ? "Remove from favorites" : "Add to favorites"}
+                    >
+                      {isFavorite(market, r.symbol) ? "★" : "☆"}
+                    </button>
+                  </div>
                 );
               })}
             </div>

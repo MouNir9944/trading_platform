@@ -5,6 +5,12 @@ import { getCandles, getMarketOverview } from "../api.js";
 import { compactMoney, formatPrice } from "../lib/format.js";
 import { formatCrosshairTime, formatTick } from "./PriceChart.jsx";
 import { usePersistentState, oneOf } from "../lib/persist.js";
+import { bollinger, ema as emaSeries, macd as macdSeries, rsi as rsiSeries } from "../../shared/analysis/indicators.js";
+import { STRATEGIES } from "../../shared/strategies/index.js";
+import { buildStrategyOverlays, strategyColor } from "../lib/strategyOverlay.js";
+import { ZonesPrimitive } from "../lib/zones.js";
+import { DrawingsPrimitive, drawingLabel } from "../lib/drawings.js";
+import { useKeepOnScreen } from "../lib/useKeepOnScreen.js";
 
 const STORAGE_KEY = "multi-charts";
 const INTERVALS = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"];
@@ -16,6 +22,7 @@ const LAYOUTS = [
   { id: "9", label: "9", cols: 3, rows: 3 },
 ];
 const DEFAULT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "DOGEUSDT", "ADAUSDT", "LINKUSDT", "AVAXUSDT"];
+const DEFAULT_MINI_OVERLAYS = { ema50: false, bb: false, rsi: false, macd: false };
 const INTERVAL_SECONDS = { "1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400 };
 const COLORS = { background: "#0f141d", grid: "#1a2231", text: "#7c8aa3", border: "#34415a", up: "#35c48c", down: "#e8604c", ema: "#d9a441" };
 
@@ -183,7 +190,7 @@ function ChartPairMenu({ market: initialMarket, symbol, alignRight, onPick, onCl
   );
 }
 
-/** One live candlestick chart with its own pair and timeframe. */
+/** One live candlestick chart with its own pair, timeframe, indicators, strategies and drawings. */
 function MiniChart({ cell, onChange, timeZone, onOpen }) {
   const containerRef = useRef(null);
   const chartRef = useRef(null);
@@ -194,11 +201,87 @@ function MiniChart({ cell, onChange, timeZone, onOpen }) {
   const [alignRight, setAlignRight] = useState(false);
   const pickRef = useRef(null);
   const { market, symbol, interval } = cell;
+  const overlays = cell.overlays ?? DEFAULT_MINI_OVERLAYS;
+  const strategyIds = cell.strategyIds ?? [];
+  const setOverlays = (next) => onChange({ ...cell, overlays: typeof next === "function" ? next(overlays) : next });
+  const setStrategyIds = (next) => onChange({ ...cell, strategyIds: typeof next === "function" ? next(strategyIds) : next });
+  // `paint`/the websocket handler are set up once per [market,symbol,interval] and must never read a stale
+  // `overlays`/`strategyIds` from that render, so they read these refs (kept current every render) instead.
+  const overlaysRef = useRef(overlays);
+  const strategyIdsRef = useRef(strategyIds);
+  overlaysRef.current = overlays;
+  strategyIdsRef.current = strategyIds;
+
+  const bbRef = useRef(null);
+  const ema50Ref = useRef(null);
+  const rsiRef = useRef(null);
+  const macdRef = useRef(null);
+  const zonesRef = useRef(null);
+  const drawingsRef = useRef(null);
+
+  const [indOpen, setIndOpen] = useState(false);
+  const indWrapRef = useRef(null);
+  const indMenuRef = useRef(null);
+  useKeepOnScreen(indMenuRef, indOpen);
+
+  const [stratOpen, setStratOpen] = useState(false);
+  const stratWrapRef = useRef(null);
+  const stratMenuRef = useRef(null);
+  useKeepOnScreen(stratMenuRef, stratOpen);
+
+  const [drawTool, setDrawTool] = useState("cursor"); // "cursor" | "trendline" | "horizontal" | "rectangle"
+  const [drawings, setDrawings] = useState([]);
+  const [drawDraft, setDrawDraft] = useState(null);
+  const [drawMenuOpen, setDrawMenuOpen] = useState(false);
+  const drawMenuWrapRef = useRef(null);
+  const drawMenuRef = useRef(null);
+  const drawStartRef = useRef(null);
+  useKeepOnScreen(drawMenuRef, drawMenuOpen);
+  const drawingsKey = `chart-drawings:${market}:${symbol}`;
 
   // a chart in the right half opens its menu towards the left so it stays on screen
   useEffect(() => {
     if (menuOpen && pickRef.current) setAlignRight(pickRef.current.getBoundingClientRect().left > window.innerWidth / 2);
   }, [menuOpen]);
+
+  // Drawings are per pair (shared with the main Trading chart's own drawings on the same pair).
+  useEffect(() => {
+    let loaded = [];
+    try {
+      const raw = window.localStorage.getItem(drawingsKey);
+      if (raw) loaded = JSON.parse(raw);
+    } catch { /* storage unavailable or corrupted */ }
+    setDrawings(Array.isArray(loaded) ? loaded : []);
+    setDrawDraft(null);
+    setDrawTool("cursor");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drawingsKey]);
+  useEffect(() => {
+    try { window.localStorage.setItem(drawingsKey, JSON.stringify(drawings)); } catch { /* storage unavailable */ }
+  }, [drawingsKey, drawings]);
+
+  // Each dropdown closes on an outside click or Escape.
+  useEffect(() => {
+    if (!indOpen) return undefined;
+    const close = (e) => { if (e.type === "keydown" ? e.key === "Escape" : !indWrapRef.current?.contains(e.target)) setIndOpen(false); };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", close);
+    return () => { document.removeEventListener("mousedown", close); document.removeEventListener("keydown", close); };
+  }, [indOpen]);
+  useEffect(() => {
+    if (!stratOpen) return undefined;
+    const close = (e) => { if (e.type === "keydown" ? e.key === "Escape" : !stratWrapRef.current?.contains(e.target)) setStratOpen(false); };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", close);
+    return () => { document.removeEventListener("mousedown", close); document.removeEventListener("keydown", close); };
+  }, [stratOpen]);
+  useEffect(() => {
+    if (!drawMenuOpen) return undefined;
+    const close = (e) => { if (e.type === "keydown" ? e.key === "Escape" : !drawMenuWrapRef.current?.contains(e.target)) setDrawMenuOpen(false); };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", close);
+    return () => { document.removeEventListener("mousedown", close); document.removeEventListener("keydown", close); };
+  }, [drawMenuOpen]);
 
   // chart once
   useEffect(() => {
@@ -209,11 +292,17 @@ function MiniChart({ cell, onChange, timeZone, onOpen }) {
       crosshair: { mode: CrosshairMode.Normal },
       rightPriceScale: { borderColor: COLORS.border, scaleMargins: { top: 0.08, bottom: 0.22 } },
       timeScale: { borderColor: COLORS.border, timeVisible: true, secondsVisible: false, rightOffset: 4, barSpacing: 7, minBarSpacing: 2 },
+      handleScroll: { mouseWheel: true, pressedMouseMove: true, horzTouchDrag: true, vertTouchDrag: true },
+      handleScale: { mouseWheel: true, pinch: true, axisPressedMouseMove: true },
     });
     const candles = chart.addSeries(CandlestickSeries, { upColor: COLORS.up, downColor: COLORS.down, borderUpColor: COLORS.up, borderDownColor: COLORS.down, wickUpColor: COLORS.up, wickDownColor: COLORS.down });
     const volume = chart.addSeries(HistogramSeries, { priceFormat: { type: "volume" }, priceScaleId: "vol", lastValueVisible: false, priceLineVisible: false });
     chart.priceScale("vol").applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
     const line = chart.addSeries(LineSeries, { color: COLORS.ema, lineWidth: 1, lastValueVisible: false, priceLineVisible: false, crosshairMarkerVisible: false });
+    zonesRef.current = new ZonesPrimitive(candles);
+    chart.panes()[0].attachPrimitive(zonesRef.current);
+    drawingsRef.current = new DrawingsPrimitive(candles);
+    chart.panes()[0].attachPrimitive(drawingsRef.current);
     chartRef.current = chart;
     seriesRef.current = { candles, volume, line };
     return () => { chart.remove(); chartRef.current = null; };
@@ -226,6 +315,128 @@ function MiniChart({ cell, onChange, timeZone, onOpen }) {
     });
   }, [timeZone]);
 
+  // A tool other than the cursor takes over the mouse (so a drag draws a shape instead of panning the chart).
+  useEffect(() => {
+    chartRef.current?.applyOptions({ handleScroll: drawTool === "cursor", handleScale: drawTool === "cursor" });
+  }, [drawTool]);
+
+  useEffect(() => {
+    drawingsRef.current?.set({ drawings, draft: drawDraft, currentPrice: status.price });
+  }, [drawings, drawDraft, status.price]);
+
+  // Indicator series: (re)built only when a toggle changes, so sub-panes keep a stable order.
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    for (const ref of [bbRef, ema50Ref, rsiRef, macdRef]) {
+      Object.values(ref.current ?? {}).forEach((series) => { try { chart.removeSeries(series); } catch { /* already gone */ } });
+      ref.current = null;
+    }
+    const ln = (color, width = 1, pane = 0, extra = {}) =>
+      chart.addSeries(LineSeries, { color, lineWidth: width, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false, ...extra }, pane);
+    if (overlays.bb) bbRef.current = { upper: ln("rgba(168,139,250,0.75)"), mid: ln("rgba(168,139,250,0.4)", 1, 0, { lineStyle: 2 }), lower: ln("rgba(168,139,250,0.75)") };
+    if (overlays.ema50) ema50Ref.current = { line: ln("#e879f9", 2) };
+    let pane = 1;
+    if (overlays.rsi) {
+      const rsiLine = ln("#a78bfa", 2, pane, { lastValueVisible: true, autoscaleInfoProvider: () => ({ priceRange: { minValue: 0, maxValue: 100 } }) });
+      for (const [price, color] of [[70, "rgba(238,106,88,0.55)"], [30, "rgba(53,196,140,0.55)"]]) {
+        rsiLine.createPriceLine({ price, color, lineWidth: 1, lineStyle: 2, axisLabelVisible: false, title: "" });
+      }
+      rsiRef.current = { line: rsiLine };
+      pane += 1;
+    }
+    if (overlays.macd) {
+      macdRef.current = { hist: chart.addSeries(HistogramSeries, { priceLineVisible: false, lastValueVisible: false }, pane), line: ln("#5b9cff", 1, pane), signal: ln("#e0aa48", 1, pane) };
+    }
+    chart.panes().forEach((p, index) => p.setStretchFactor(index === 0 ? 3 : 1));
+    refreshOverlays();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overlays.bb, overlays.ema50, overlays.rsi, overlays.macd]);
+
+  // Strategy signal overlays (zones/lines/labels), recomputed whenever the chosen strategies change.
+  useEffect(() => {
+    refreshOverlays();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [strategyIds.join(","), market]);
+
+  const closes = () => barsRef.current.map((b) => b.close);
+  const points = (values) => barsRef.current.flatMap((b, i) => (values[i] == null ? [] : [{ time: b.time, value: values[i] }]));
+
+  /** Recompute the EMA50/BB/RSI/MACD series and the strategy zones from whatever bars are loaded right now. */
+  function refreshOverlays() {
+    const bars = barsRef.current;
+    if (!bars.length) return;
+    if (bbRef.current) {
+      const bb = bollinger(closes());
+      bbRef.current.upper.setData(points(bb.upper));
+      bbRef.current.mid.setData(points(bb.mid));
+      bbRef.current.lower.setData(points(bb.lower));
+    }
+    if (ema50Ref.current) ema50Ref.current.line.setData(points(emaSeries(closes(), 50)));
+    if (rsiRef.current) rsiRef.current.line.setData(points(rsiSeries(closes())));
+    if (macdRef.current) {
+      const m = macdSeries(closes());
+      macdRef.current.line.setData(points(m.line));
+      macdRef.current.signal.setData(points(m.signal));
+      macdRef.current.hist.setData(bars.flatMap((b, i) => {
+        const v = m.histogram[i];
+        if (v == null) return [];
+        const rising = i > 0 && m.histogram[i - 1] != null && v > m.histogram[i - 1];
+        const color = v >= 0 ? (rising ? "rgba(53,196,140,0.75)" : "rgba(53,196,140,0.4)") : (rising ? "rgba(238,106,88,0.4)" : "rgba(238,106,88,0.75)");
+        return [{ time: b.time, value: v, color }];
+      }));
+    }
+    const ids = strategyIdsRef.current;
+    if (zonesRef.current) {
+      const overlay = ids.length ? buildStrategyOverlays(ids, bars, { market }) : { zones: [], lines: [], labels: [] };
+      zonesRef.current.set(overlay);
+    }
+  }
+
+  function pointAtClient(clientX, clientY) {
+    const chart = chartRef.current;
+    const candles = seriesRef.current.candles;
+    const container = containerRef.current;
+    if (!chart || !candles || !container) return null;
+    const rect = container.getBoundingClientRect();
+    const time = chart.timeScale().coordinateToTime(clientX - rect.left);
+    const price = candles.coordinateToPrice(clientY - rect.top);
+    if (time == null || price == null || !Number.isFinite(price)) return null;
+    return { time, price: Number(price) };
+  }
+  function addDrawing(shape) {
+    setDrawings((previous) => [...previous, { ...shape, id: `d${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}` }]);
+  }
+  function removeDrawing(id) {
+    setDrawings((previous) => previous.filter((d) => d.id !== id));
+  }
+  function beginDraw(event) {
+    if (drawTool === "cursor" || event.button !== 0) return;
+    event.preventDefault();
+    const point = pointAtClient(event.clientX, event.clientY);
+    if (!point) return;
+    try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* not supported */ }
+    if (drawTool === "horizontal") { addDrawing({ type: "horizontal", p: point.price }); return; }
+    drawStartRef.current = point;
+    setDrawDraft({ type: drawTool, t1: point.time, p1: point.price, t2: point.time, p2: point.price });
+  }
+  function onDrawMove(event) {
+    if (!drawStartRef.current) return;
+    const point = pointAtClient(event.clientX, event.clientY);
+    if (!point) return;
+    setDrawDraft({ type: drawTool, t1: drawStartRef.current.time, p1: drawStartRef.current.price, t2: point.time, p2: point.price });
+  }
+  function endDraw(event) {
+    if (!drawStartRef.current) return;
+    const point = pointAtClient(event.clientX, event.clientY) ?? drawStartRef.current;
+    const start = drawStartRef.current;
+    drawStartRef.current = null;
+    setDrawDraft(null);
+    try { event.currentTarget.releasePointerCapture(event.pointerId); } catch { /* already released */ }
+    if (start.time === point.time && start.price === point.price) return;
+    addDrawing({ type: drawTool, t1: start.time, p1: start.price, t2: point.time, p2: point.price });
+  }
+
   function paint(fit) {
     const { candles, volume, line } = seriesRef.current;
     const bars = barsRef.current;
@@ -235,6 +446,7 @@ function MiniChart({ cell, onChange, timeZone, onOpen }) {
     const values = ema(bars.map((b) => b.close), 21);
     line.setData(bars.map((b, i) => (values[i] == null ? null : { time: b.time, value: values[i] })).filter(Boolean));
     if (fit) chartRef.current?.timeScale().fitContent();
+    refreshOverlays();
     setStatus({ price: bars[bars.length - 1].close, change: changeOver(bars, interval), error: null });
   }
 
@@ -271,6 +483,7 @@ function MiniChart({ cell, onChange, timeZone, onOpen }) {
         const { candles, volume } = seriesRef.current;
         candles.update(bar);
         volume.update({ time: bar.time, value: bar.volume, color: bar.close >= bar.open ? "rgba(53,196,140,0.3)" : "rgba(232,96,76,0.3)" });
+        refreshOverlays();
         setStatus((s) => ({ ...s, price: bar.close, change: changeOver(bars, interval) }));
       };
       socket.onclose = () => { if (!cancelled) retry = window.setTimeout(connect, 3000); };
@@ -285,6 +498,7 @@ function MiniChart({ cell, onChange, timeZone, onOpen }) {
   }, [market, symbol, interval]);
 
   const up = (status.change?.pct ?? 0) >= 0;
+  const activeIndicators = Object.values(overlays).filter(Boolean).length;
 
   return (
     <div className="mini-chart">
@@ -314,8 +528,80 @@ function MiniChart({ cell, onChange, timeZone, onOpen }) {
         </select>
         <button type="button" className="mini-open" onClick={() => onOpen(cell)} title="Open this pair in the trading screen">Trade ↗</button>
       </div>
+      <div className="mini-toolbar-row">
+        <div className="mini-ind-wrap" ref={indWrapRef}>
+          <button type="button" className={`ind-button${activeIndicators ? " is-on" : ""}`} aria-expanded={indOpen} onClick={() => setIndOpen((v) => !v)}>
+            Ind{activeIndicators ? ` · ${activeIndicators}` : ""}
+          </button>
+          {indOpen && (
+            <div className="ind-menu" role="group" aria-label="Indicators" ref={indMenuRef}>
+              <div className="ind-group">
+                {[["ema50", "EMA 50"], ["bb", "Bollinger"], ["rsi", "RSI"], ["macd", "MACD"]].map(([key, label]) => (
+                  <label key={key} className="ind-item">
+                    <input type="checkbox" checked={overlays[key]} onChange={() => setOverlays((prev) => ({ ...prev, [key]: !prev[key] }))} />
+                    <span>{label}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="mini-strat-wrap" ref={stratWrapRef}>
+          <button type="button" className={`ind-button${strategyIds.length ? " is-on" : ""}`} aria-expanded={stratOpen} onClick={() => setStratOpen((v) => !v)}>
+            Strategies{strategyIds.length ? ` · ${strategyIds.length}` : ""}
+          </button>
+          {stratOpen && (
+            <div className="ind-menu strat-menu" role="group" aria-label="Strategies" ref={stratMenuRef}>
+              <div className="ind-group">
+                {STRATEGIES.map((s, i) => (
+                  <label key={s.id} className="ind-item" title={s.description}>
+                    <input
+                      type="checkbox"
+                      checked={strategyIds.includes(s.id)}
+                      onChange={() => setStrategyIds((prev) => (prev.includes(s.id) ? prev.filter((id) => id !== s.id) : [...prev, s.id]))}
+                    />
+                    <i className="strat-dot" style={{ background: strategyColor(i) }} aria-hidden="true" />
+                    <span>{s.name}</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+        <div className="segmented segmented-small mini-draw-tools" role="group" aria-label="Draw on the chart">
+          <button type="button" className={drawTool === "cursor" ? "is-active" : ""} onClick={() => setDrawTool("cursor")} title="Cursor">⌖</button>
+          <button type="button" className={drawTool === "trendline" ? "is-active" : ""} onClick={() => setDrawTool("trendline")} title="Trendline: drag from one point to another">⟋</button>
+          <button type="button" className={drawTool === "horizontal" ? "is-active" : ""} onClick={() => setDrawTool("horizontal")} title="Horizontal line: click a price to mark a level">—</button>
+          <button type="button" className={drawTool === "rectangle" ? "is-active" : ""} onClick={() => setDrawTool("rectangle")} title="Rectangle: drag to mark a zone">▭</button>
+        </div>
+        <div className="mini-draw-menu-wrap" ref={drawMenuWrapRef}>
+          <button type="button" className={`ind-button${drawings.length ? " is-on" : ""}`} aria-expanded={drawMenuOpen} onClick={() => setDrawMenuOpen((v) => !v)} disabled={!drawings.length} title="Your drawings on this pair">
+            {drawings.length ? `Drawings · ${drawings.length}` : "Drawings"}
+          </button>
+          {drawMenuOpen && drawings.length > 0 && (
+            <div className="ind-menu draw-menu" role="group" aria-label="Your drawings" ref={drawMenuRef}>
+              <ul className="draw-list">
+                {drawings.map((shape) => (
+                  <li key={shape.id}>
+                    <span>{drawingLabel(shape)}</span>
+                    <button type="button" className="draw-remove" aria-label={`Delete ${drawingLabel(shape)}`} onClick={() => removeDrawing(shape.id)}>×</button>
+                  </li>
+                ))}
+              </ul>
+              <button type="button" className="mini-button danger" onClick={() => { setDrawings([]); setDrawMenuOpen(false); }}>Clear all</button>
+            </div>
+          )}
+        </div>
+      </div>
       <div className="mini-body">
         <div ref={containerRef} className="mini-canvas" />
+        <div
+          className={`draw-overlay${drawTool !== "cursor" ? " is-active" : ""}`}
+          onPointerDown={beginDraw}
+          onPointerMove={onDrawMove}
+          onPointerUp={endDraw}
+          onPointerCancel={endDraw}
+        />
         {status.error && <p className="mini-error">{status.error}</p>}
       </div>
     </div>
