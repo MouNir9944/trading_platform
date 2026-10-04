@@ -1067,38 +1067,45 @@ export default function PriceChart({
           onPointerCancel={endDraw}
         />
         <div className="long-position-layer" aria-hidden="true">
-          {positionBoxes.map((box) => (
-            <div key={box.id} className={`long-position-box${box.preview ? " is-preview" : ""}${box.draggable ? " is-draggable" : ""}${box.blocked ? " is-blocked" : ""}`} style={{ left: box.left, width: box.width }}>
-              <div
-                className={`long-position-tp${box.draggable ? " is-draggable" : ""}`}
-                style={{ top: Math.min(box.takeY, box.entryY), height: Math.abs(box.entryY - box.takeY) }}
-                {...(box.draggable ? { onPointerDown: beginDrag("target"), onPointerMove: onDragMove, onPointerUp: endDrag, onPointerCancel: endDrag, title: "Drag to move the take-profit" } : {})}
-              >
-                <span>{box.draggable ? "⋮⋮ " : ""}Take Profit</span>
-                <strong>{formatPrice(box.takeProfit)} <small>{formatPct(box.takeProfit, box.markPrice)}</small></strong>
-                <em className="pnl-positive">{formatPnl(box.targetPnl)}</em>
+          {positionBoxes.map((box) => {
+            const tp = zoneLayout(box.takeY, box.entryY, box.chartHeight);
+            const sl = zoneLayout(box.stopY, box.entryY, box.chartHeight);
+            const grip = box.draggable ? "⋮⋮ " : "";
+            return (
+              <div key={box.id} className={`long-position-box${box.preview ? " is-preview" : ""}${box.draggable ? " is-draggable" : ""}${box.blocked ? " is-blocked" : ""}${box.width < NARROW_BOX_PX ? " is-narrow" : ""}`} style={{ left: box.left, width: box.width }}>
+                <div
+                  className={`long-position-tp ${tp.className}${box.draggable ? " is-draggable" : ""}`}
+                  style={{ top: tp.top, height: tp.height }}
+                  {...(box.draggable ? { onPointerDown: beginDrag("target"), onPointerMove: onDragMove, onPointerUp: endDrag, onPointerCancel: endDrag, title: "Drag to move the take-profit" } : {})}
+                >
+                  <span>{grip}Take Profit</span>
+                  <strong>{formatPrice(box.takeProfit)} <small>{formatPct(box.takeProfit, box.markPrice)}</small></strong>
+                  <em className="pnl-positive">{formatPnl(box.targetPnl)}</em>
+                </div>
+                {tp.tag && <div className="long-position-tag is-tp" style={{ top: tp.tag.top }}>Take Profit {formatPrice(box.takeProfit)} <small>{formatPct(box.takeProfit, box.markPrice)}</small> {formatPnl(box.targetPnl)}</div>}
+                <div
+                  className={`long-position-entry${box.draggable ? " is-draggable" : ""}`}
+                  style={{ top: box.entryY }}
+                  {...(box.draggable ? { onPointerDown: beginDrag("entry"), onPointerMove: onDragMove, onPointerUp: endDrag, onPointerCancel: endDrag, title: "Drag to move the entry" } : {})}
+                >
+                  <span>{grip}Entry</span>
+                  <strong>{formatPrice(box.entry)} <small>{formatPct(box.entry, box.markPrice)}</small></strong>
+                  {box.rr > 0 && <em>1 : {box.rr.toFixed(1)}</em>}
+                </div>
+                <div
+                  className={`long-position-sl ${sl.className}${box.draggable ? " is-draggable" : ""}`}
+                  style={{ top: sl.top, height: sl.height }}
+                  {...(box.draggable ? { onPointerDown: beginDrag("stop"), onPointerMove: onDragMove, onPointerUp: endDrag, onPointerCancel: endDrag, title: "Drag to move the stop-loss" } : {})}
+                >
+                  <span>{grip}Stop Loss</span>
+                  <strong>{formatPrice(box.stopLoss)} <small>{formatPct(box.stopLoss, box.markPrice)}</small></strong>
+                  <em className="pnl-negative">{formatPnl(box.stopPnl)}</em>
+                </div>
+                {sl.tag && <div className="long-position-tag is-sl" style={{ top: sl.tag.top }}>Stop Loss {formatPrice(box.stopLoss)} <small>{formatPct(box.stopLoss, box.markPrice)}</small> {formatPnl(box.stopPnl)}</div>}
+                {box.blocked && <div className="long-position-blocked">Blocked by risk rules</div>}
               </div>
-              <div
-                className={`long-position-entry${box.draggable ? " is-draggable" : ""}`}
-                style={{ top: box.entryY }}
-                {...(box.draggable ? { onPointerDown: beginDrag("entry"), onPointerMove: onDragMove, onPointerUp: endDrag, onPointerCancel: endDrag, title: "Drag to move the entry" } : {})}
-              >
-                <span>{box.draggable ? "⋮⋮ " : ""}Entry</span>
-                <strong>{formatPrice(box.entry)} <small>{formatPct(box.entry, box.markPrice)}</small></strong>
-                {box.rr > 0 && <em>1 : {box.rr.toFixed(1)}</em>}
-              </div>
-              <div
-                className={`long-position-sl${box.draggable ? " is-draggable" : ""}`}
-                style={{ top: Math.min(box.entryY, box.stopY), height: Math.abs(box.stopY - box.entryY) }}
-                {...(box.draggable ? { onPointerDown: beginDrag("stop"), onPointerMove: onDragMove, onPointerUp: endDrag, onPointerCancel: endDrag, title: "Drag to move the stop-loss" } : {})}
-              >
-                <span>{box.draggable ? "⋮⋮ " : ""}Stop Loss</span>
-                <strong>{formatPrice(box.stopLoss)} <small>{formatPct(box.stopLoss, box.markPrice)}</small></strong>
-                <em className="pnl-negative">{formatPnl(box.stopPnl)}</em>
-              </div>
-              {box.blocked && <div className="long-position-blocked">Blocked by risk rules</div>}
-            </div>
-          ))}
+            );
+          })}
           {livePnlMarkers.map((marker) => (
             <div
               key={marker.id}
@@ -1316,6 +1323,28 @@ function positionBoxRange(timeScale, orderTime, lastCandleTime, chartWidth) {
   if (right <= left) return null;
 
   return { left, width: right - left };
+}
+
+// ---- order box labels that fit whatever room the zone has ----
+// A zone's height in pixels changes with the price range on screen (timeframe, zoom, how far the stop is), so its
+// text cannot be a fixed three-line block: it would spill over the entry row. Three layouts instead:
+//   full  three lines (label, price and %, P&L), when the zone is tall enough
+//   line  one line, when it is tight
+//   tag   no text inside; a small tag just beyond the far edge, when the zone is a sliver
+const ENTRY_HALF_PX = 11; // half the entry row's height: it covers the end of each zone
+const NARROW_BOX_PX = 230; // narrower than this the P&L and % are dropped from the one-line layout
+export function zoneLayout(farY, entryY, chartHeight) {
+  const above = farY < entryY;
+  const top = Math.min(farY, entryY);
+  const height = Math.abs(entryY - farY);
+  const room = height - ENTRY_HALF_PX;
+  const tier = room >= 54 ? "full" : room >= 18 ? "line" : "tag";
+  let tag = null;
+  if (tier === "tag") {
+    const wanted = above ? top - 19 : top + height + 2;
+    tag = { top: Math.max(2, Math.min(chartHeight - 20, wanted)) };
+  }
+  return { top, height, className: `is-${above ? "above" : "below"} tier-${tier}`, tag };
 }
 
 function boxesEqual(left, right) {

@@ -508,6 +508,8 @@ select:focus-visible {
   flex-direction: column;
   justify-content: flex-start;
   left: 0;
+  min-width: 0;
+  overflow: hidden;
   padding: 6px 8px;
   position: absolute;
   right: 0;
@@ -523,8 +525,51 @@ select:focus-visible {
   background: rgba(239, 83, 80, 0.24);
   border-color: rgba(239, 83, 80, 0.7);
   color: #ffb4ae;
-  justify-content: flex-end;
 }
+
+/* Text sits at the zone's far edge (away from the entry row), whichever way the trade points. */
+.long-position-tp.is-above,
+.long-position-sl.is-above { justify-content: flex-start; padding-bottom: 14px; }
+.long-position-tp.is-below,
+.long-position-sl.is-below { justify-content: flex-end; padding-top: 14px; }
+
+/* Tight zone: one line instead of three. */
+.long-position-tp.tier-line,
+.long-position-sl.tier-line { flex-direction: row; gap: 8px; padding-bottom: 0; padding-top: 0; white-space: nowrap; }
+.long-position-tp.tier-line.is-above,
+.long-position-sl.tier-line.is-above { align-items: flex-start; padding-top: 2px; }
+.long-position-tp.tier-line.is-below,
+.long-position-sl.tier-line.is-below { align-items: flex-end; padding-bottom: 2px; }
+.long-position-tp.tier-line em,
+.long-position-sl.tier-line em { margin-top: 0; }
+
+/* Sliver: no text inside, the tag outside the zone carries it. */
+.long-position-tp.tier-tag > *,
+.long-position-sl.tier-tag > * { display: none; }
+
+.long-position-tag {
+  border-radius: 3px;
+  box-sizing: border-box;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  left: 0;
+  line-height: 17px;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 0 6px;
+  position: absolute;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.long-position-tag small { font-weight: 500; opacity: 0.8; }
+.long-position-tag.is-tp { background: rgba(21, 70, 66, 0.95); color: #9de8df; }
+.long-position-tag.is-sl { background: rgba(94, 38, 36, 0.95); color: #ffb4ae; }
+
+/* Narrow box (the draggable draft): keep the labels, drop the extras. */
+.long-position-box.is-narrow .tier-line em,
+.long-position-box.is-narrow .tier-line strong small,
+.long-position-box.is-narrow .long-position-entry em { display: none; }
 
 .long-position-tp span,
 .long-position-sl span,
@@ -561,10 +606,12 @@ select:focus-visible {
   justify-content: space-between;
   left: 0;
   min-height: 22px;
+  overflow: hidden;
   padding: 2px 8px;
   position: absolute;
   right: 0;
   transform: translateY(-50%);
+  white-space: nowrap;
   z-index: 2;
 }
 
