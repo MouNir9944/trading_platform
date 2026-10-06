@@ -3,6 +3,7 @@ import { CandlestickSeries, ColorType, HistogramSeries, LineSeries, createChart 
 
 import { analyzeStock } from "../../shared/analysis/stock.js";
 import { analyzeCompany, bigMoney, combinedRead } from "../../shared/analysis/company.js";
+import { PHASES } from "../../shared/analysis/phase.js";
 import { sma, toCandles } from "../../shared/analysis/index.js";
 import { usePersistentState, oneOf } from "../lib/persist.js";
 import { getStockCompany, getStockHistory, searchStocks } from "../api.js";
@@ -134,6 +135,65 @@ function AnalystView({ analysts, price }) {
   );
 }
 
+const BASIS_LABEL = { forward: "forward", trailing: "trailing", estimated: "forward, estimated" };
+const BAND_LABEL = { low: "low", moderate: "moderate", high: "high" };
+
+/**
+ * Which of the five life phases the company is in (answers to three yes/no questions), and the two yardsticks that
+ * phase is valued by. See shared/analysis/phase.js for the rules.
+ */
+function PhaseCard({ phase }) {
+  if (!phase?.ok) return null;
+  const val = phase.valuation;
+  return (
+    <section className="sa-phase" aria-label="Company phase">
+      <p className="sa-sub">Company phase</p>
+      <ol className="sa-phase-track">
+        {Object.values(PHASES).map((x) => (
+          <li key={x.id} className={`${phase.phase === x.id ? "is-current" : ""}${phase.candidates.some((c) => c.phase === x.id) ? " is-candidate" : ""}`} aria-current={phase.phase === x.id ? "step" : undefined}>
+            <b>{x.id}</b><span>{x.name}</span>
+          </li>
+        ))}
+      </ol>
+      {phase.phase ? (
+        <p className="sa-phase-tagline"><strong>Phase {phase.phase}: {phase.name}.</strong> {phase.tagline}{phase.inferred ? " (Inferred from partial data.)" : ""}</p>
+      ) : (
+        <p className="sa-phase-tagline"><strong>Phase unclear.</strong> The data leaves {phase.candidates.map((c) => `${c.phase} (${c.name})`).join(" or ")} open.</p>
+      )}
+      <div className="sa-phase-answers">
+        {phase.answers.map((a) => (
+          <div key={a.key} className={`sa-phase-answer is-${a.answer == null ? "unknown" : a.answer ? "yes" : "no"}`}>
+            <span>{a.question}</span>
+            <b>{a.answer == null ? "Unknown" : a.answer ? "Yes" : "No"}</b>
+            <small>{a.detail}</small>
+          </div>
+        ))}
+      </div>
+      {val && (
+        <>
+          <p className="sa-sub">How to value it in this phase</p>
+          <div className="sa-phase-metrics">
+            {val.metrics.map((m) => (
+              <div key={m.key} className="sa-phase-metric" title={m.help}>
+                <span>{m.label} <em>{BASIS_LABEL[m.basis] ?? m.basis}</em></span>
+                <b>{m.value == null ? "—" : `${m.value.toFixed(1)}×`}</b>
+                {m.band && <i className={`band-${m.band}`}>{BAND_LABEL[m.band]}</i>}
+                {m.alt && <small>{BASIS_LABEL[m.alt.basis]}: {m.alt.value.toFixed(1)}×</small>}
+                <small className="note">{m.note}</small>
+              </div>
+            ))}
+          </div>
+          <div className={`sa-verdict is-${val.read.tone}`}>
+            <div className="sa-verdict-row"><strong>{val.read.label}</strong></div>
+            <p>{val.read.summary} The ranges are rough rules of thumb, not advice: sector and interest rates change what is normal.</p>
+          </div>
+        </>
+      )}
+      {phase.notes.length > 0 && <ul className="sa-phase-notes">{phase.notes.map((n) => <li key={n}>{n}</li>)}</ul>}
+    </section>
+  );
+}
+
 function CompanyTab({ company, analysis, price }) {
   const [more, setMore] = useState(false);
   const p = company.profile;
@@ -165,6 +225,8 @@ function CompanyTab({ company, analysis, price }) {
         </div>
         <p>{analysis.verdict.summary}</p>
       </div>
+
+      {company.kind === "company" && <PhaseCard phase={analysis.phase} />}
 
       {company.kind === "company" ? (
         <>

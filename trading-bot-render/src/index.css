@@ -2360,6 +2360,41 @@ button.mini-symbol:hover, button.mini-symbol[aria-expanded="true"] { border-colo
 .sa-plan-grid b { font-family: var(--font-mono); font-size: 13px; }
 .sa-plan-grid em { color: var(--text-faint); font-style: normal; font-size: 11px; }
 .sa-warnings { background: rgba(224, 170, 72, 0.08); border: 1px solid rgba(224, 170, 72, 0.4); border-radius: var(--radius); color: #f0c880; font-size: 12px; line-height: 1.5; margin: 0; padding: 8px 14px 8px 28px; }
+/* ---- Company phase ---- */
+.sa-phase { background: var(--surface-2); border: 1px solid var(--border-soft); border-radius: var(--radius); display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; }
+.sa-phase .sa-sub { margin: 0; }
+.sa-phase-track { display: grid; gap: 6px; grid-template-columns: repeat(5, minmax(0, 1fr)); list-style: none; margin: 0; padding: 0; }
+.sa-phase-track li { align-items: center; background: var(--surface-3); border: 1px solid transparent; border-radius: 8px; color: var(--text-faint); display: flex; font-size: 11.5px; gap: 6px; padding: 6px 8px; }
+.sa-phase-track li b { background: var(--surface-2); border-radius: 50%; flex: none; font-family: var(--font-mono); font-size: 11px; height: 18px; line-height: 18px; text-align: center; width: 18px; }
+.sa-phase-track li.is-current { background: rgba(76, 141, 255, 0.16); border-color: var(--accent); color: var(--text-primary); font-weight: 600; }
+.sa-phase-track li.is-current b { background: var(--accent); color: #fff; }
+.sa-phase-track li.is-candidate { border-color: #e0aa48; border-style: dashed; color: var(--text-muted); }
+.sa-phase-tagline { color: var(--text-muted); font-size: 12.5px; line-height: 1.5; margin: 0; }
+.sa-phase-tagline strong { color: var(--text-primary); }
+.sa-phase-answers { display: grid; gap: 8px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.sa-phase-answer { background: var(--surface-3); border-left: 3px solid var(--border); border-radius: 8px; display: flex; flex-direction: column; gap: 2px; padding: 7px 10px; }
+.sa-phase-answer span { color: var(--text-faint); font-size: 10.5px; text-transform: uppercase; }
+.sa-phase-answer b { font-size: 15px; }
+.sa-phase-answer small { color: var(--text-muted); font-size: 11.5px; line-height: 1.4; }
+.sa-phase-answer.is-yes { border-left-color: #35c48c; }
+.sa-phase-answer.is-yes b { color: #5fdba5; }
+.sa-phase-answer.is-no { border-left-color: #e8604c; }
+.sa-phase-answer.is-no b { color: #f58a8a; }
+.sa-phase-answer.is-unknown { border-left-color: #e0aa48; }
+.sa-phase-answer.is-unknown b { color: #f0c880; }
+.sa-phase-metrics { display: grid; gap: 8px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.sa-phase-metric { background: var(--surface-3); border-radius: 8px; display: flex; flex-wrap: wrap; gap: 2px 8px; padding: 8px 10px; }
+.sa-phase-metric span { color: var(--text-faint); flex: 1 0 100%; font-size: 10.5px; text-transform: uppercase; }
+.sa-phase-metric span em { color: var(--accent); font-style: normal; text-transform: none; }
+.sa-phase-metric b { font-family: var(--font-mono); font-size: 20px; }
+.sa-phase-metric i { align-self: center; border-radius: 999px; font-size: 10.5px; font-style: normal; padding: 1px 8px; }
+.sa-phase-metric i.band-low { background: rgba(53, 196, 140, 0.16); color: #5fdba5; }
+.sa-phase-metric i.band-moderate { background: rgba(224, 170, 72, 0.16); color: #f0c880; }
+.sa-phase-metric i.band-high { background: rgba(232, 96, 76, 0.16); color: #f58a8a; }
+.sa-phase-metric small { color: var(--text-muted); flex: 1 0 100%; font-size: 11.5px; }
+.sa-phase-metric small.note { color: var(--text-faint); line-height: 1.4; }
+.sa-phase-notes { color: var(--text-muted); font-size: 12px; line-height: 1.5; margin: 0; padding-left: 18px; }
+@media (max-width: 700px) { .sa-phase-track { grid-template-columns: 1fr 1fr; } .sa-phase-answers, .sa-phase-metrics { grid-template-columns: 1fr; } }
 @media (max-width: 900px) { .sa-factors { grid-template-columns: 1fr; } .sa-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); } .sa-plan-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
 /* ---- Company analysis ---- */

@@ -13,9 +13,10 @@ const HEADERS = { "User-Agent": "Mozilla/5.0 (compatible; TradingTerminal/1.0)",
 const PLAIN_HEADERS = { "User-Agent": HEADERS["User-Agent"] }; // the crumb endpoint answers 406 to an Accept header
 const TIMEOUT_MS = 15_000;
 const SUMMARY_URL = "https://query2.finance.yahoo.com/v10/finance/quoteSummary";
+const TIMESERIES_URL = "https://query1.finance.yahoo.com/ws/fundamentals-timeseries/v1/finance/timeseries";
 const COOKIE_URL = "https://fc.yahoo.com/";
 const CRUMB_URL = "https://query1.finance.yahoo.com/v1/test/getcrumb";
-const MODULES = ["price", "assetProfile", "summaryDetail", "defaultKeyStatistics", "financialData", "calendarEvents", "recommendationTrend", "incomeStatementHistory", "fundProfile", "topHoldings"].join(",");
+const MODULES = ["price", "assetProfile", "summaryDetail", "defaultKeyStatistics", "financialData", "calendarEvents", "recommendationTrend", "incomeStatementHistory", "fundProfile", "topHoldings", "earningsTrend"].join(",");
 const COMPANY_TTL_MS = 6 * 3600_000;
 const SESSION_TTL_MS = 50 * 60_000;
 const HISTORY_TTL_MS = 30 * 60_000;
@@ -90,6 +91,7 @@ export function parseCompany(json, symbol) {
     netIncome: raw(y.netIncome),
   })).filter((y) => y.year);
   const fees = r.fundProfile?.feesExpensesInvestment ?? {};
+  const periods = Object.fromEntries((r.earningsTrend?.trend ?? []).map((t) => [t.period, t]));
 
   return {
     symbol,
@@ -144,6 +146,15 @@ export function parseCompany(json, symbol) {
     },
     events: { nextEarnings: earningsDate ? earningsDate * 1000 : null, exDividendDate: exDividend ? exDividend * 1000 : null },
     history: statements,
+    // What analysts expect: revenue and EPS for this fiscal year and the next ("0y" and "+1y").
+    forward: {
+      revenueThisYear: raw(periods["0y"]?.revenueEstimate?.avg),
+      revenueNextYear: raw(periods["+1y"]?.revenueEstimate?.avg),
+      epsThisYear: raw(periods["0y"]?.earningsEstimate?.avg),
+      epsNextYear: raw(periods["+1y"]?.earningsEstimate?.avg),
+      forwardEps: raw(stats.forwardEps),
+    },
+    fundamentals: null, // filled in by createStockData().company from the time-series endpoint
     fund: isFund ? {
       category: r.fundProfile?.categoryName ?? null,
       family: r.fundProfile?.family ?? null,
@@ -153,6 +164,45 @@ export function parseCompany(json, symbol) {
       topHoldings: (r.topHoldings?.holdings ?? []).map((h) => ({ symbol: h.symbol ?? null, name: h.holdingName ?? null, weight: raw(h.holdingPercent) })),
     } : null,
   };
+}
+
+/** Yahoo time-series series we read, as [type, metric]. Cash paid out (buybacks, dividends) is stored as a positive amount. */
+const SERIES = [
+  ["TotalRevenue", "revenue"], ["GrossProfit", "grossProfit"], ["NetIncome", "netIncome"], ["FreeCashFlow", "freeCashFlow"],
+  ["RepurchaseOfCapitalStock", "buybacks"], ["CashDividendsPaid", "dividends"],
+];
+const PAID_OUT = new Set(["buybacks", "dividends"]);
+const TIMESERIES_TYPES = [...SERIES.flatMap(([type]) => [`annual${type}`, `trailing${type}`]), "annualBasicAverageShares"].join(",");
+
+/**
+ * Yahoo fundamentals-timeseries JSON -> `{ annual, trailing }`, each a map of metric -> [{ date, value }] oldest first.
+ * `annual` is one point per fiscal year, `trailing` one per quarter (the last twelve months as of that date). The
+ * quoteSummary statements that used to hold this now come back empty, which is why this endpoint is used.
+ * Returns null when the answer holds nothing usable.
+ */
+export function parseFundamentals(json) {
+  const rows = json?.timeseries?.result;
+  if (!Array.isArray(rows) || !rows.length) return null;
+  const out = { annual: {}, trailing: {} };
+  let any = false;
+  for (const row of rows) {
+    const key = row?.meta?.type?.[0];
+    const match = /^(annual|trailing)(.+)$/.exec(key ?? "");
+    if (!match) continue;
+    const [, period, type] = match;
+    const metric = type === "BasicAverageShares" ? "shares" : SERIES.find(([t]) => t === type)?.[1];
+    if (!metric) continue;
+    const points = (row[key] ?? [])
+      .map((d) => ({ date: d.asOfDate, value: raw(d.reportedValue) }))
+      .filter((d) => d.date && d.value != null)
+      .map((d) => ({ date: d.date, value: PAID_OUT.has(metric) ? Math.abs(d.value) : d.value }))
+      .sort((a, b) => (a.date < b.date ? -1 : 1));
+    if (points.length) {
+      out[period][metric] = points;
+      any = true;
+    }
+  }
+  return any ? out : null;
 }
 
 export function createStockData({ fetchFn = fetch, now = Date.now } = {}) {
@@ -215,9 +265,26 @@ export function createStockData({ fetchFn = fetch, now = Date.now } = {}) {
     throw new Error("The company data service refused the request");
   }
 
+  /** Annual and trailing revenue, profit, cash flow, buybacks and dividends. Optional: any failure just means "no figures". */
+  async function getFundamentals(symbol) {
+    try {
+      const { cookie, crumb } = await getSession();
+      const end = Math.floor(now() / 1000);
+      const url = `${TIMESERIES_URL}/${encodeURIComponent(toYahooSymbol(symbol))}?type=${TIMESERIES_TYPES}&merge=false&period1=${end - 6 * 365 * 86400}&period2=${end}&crumb=${encodeURIComponent(crumb)}`;
+      const response = await fetchFn(url, { headers: { ...PLAIN_HEADERS, Cookie: cookie }, signal: AbortSignal.timeout(TIMEOUT_MS) });
+      return response.ok ? parseFundamentals(await response.json()) : null;
+    } catch {
+      return null;
+    }
+  }
+
   return {
     /** Company profile, valuation, growth, margins, debt, analyst targets and earnings date (or fund facts for an ETF). */
-    company: (symbol) => cached(`company:${symbol}`, COMPANY_TTL_MS, async () => parseCompany(await getSummary(symbol), symbol)),
+    company: (symbol) => cached(`company:${symbol}`, COMPANY_TTL_MS, async () => {
+      const company = parseCompany(await getSummary(symbol), symbol);
+      if (company.kind === "company") company.fundamentals = await getFundamentals(symbol);
+      return company;
+    }),
     /** Two years of daily candles plus name and 52-week range. */
     daily: (symbol) => cached(`daily:${symbol}`, HISTORY_TTL_MS, async () =>
       parseChart(await getJson(`${CHART_URL}/${encodeURIComponent(toYahooSymbol(symbol))}?range=2y&interval=1d`), symbol)),

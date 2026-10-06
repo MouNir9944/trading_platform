@@ -9,6 +9,7 @@ export * from "./smc.js";
 export * from "./amd.js";
 export * from "./volumeProfile.js";
 export * from "./manipulation.js";
+export * from "./phase.js";
 export * from "./performance.js";
 
 /**

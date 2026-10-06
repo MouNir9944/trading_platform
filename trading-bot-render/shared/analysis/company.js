@@ -16,6 +16,8 @@
  * It only knows the reported numbers. It cannot judge the products, competition, management or the news.
  */
 
+import { analyzePhase } from "./phase.js";
+
 const factor = (group, label, points, max, note, tone) => ({ group, label, points, max, note, tone: tone ?? (points >= max * 0.66 ? "good" : points >= max * 0.33 ? "mixed" : "bad") });
 const pct = (v, d = 1) => (v == null ? null : Math.round(v * 100 * 10 ** d) / 10 ** d);
 const round = (n, d = 1) => (n == null || !Number.isFinite(n) ? null : Math.round(n * 10 ** d) / 10 ** d);
@@ -144,7 +146,7 @@ export function analyzeCompany(company, { price = null, now = Date.now() } = {})
   else if (score >= 40) verdict = { label: "Mixed fundamentals", tone: "mixed", summary: "Some numbers are good and some are not. There is no clear fundamental case either way." };
   else verdict = { label: "Weak fundamentals", tone: "bad", summary: "Most reported numbers are weak. Owning it is a bet on a turnaround or on future profit." };
 
-  return { ok: true, kind: "company", score, verdict, factors: f, flags, earningsInDays: earningsIn };
+  return { ok: true, kind: "company", score, verdict, factors: f, flags, earningsInDays: earningsIn, phase: analyzePhase(company, { price }) };
 }
 
 export function analyzeFund(fund, { now = Date.now() } = {}) {
