@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { capRatio, compactMoney, formatPrice, splitPair } from "../lib/format.js";
 import { usePersistentState, oneOf } from "../lib/persist.js";
+import { useFavorites } from "../lib/favorites.js";
 
 const CATEGORY_CHIPS = [
   ["all", "All"],
@@ -32,7 +33,6 @@ const SORT_FNS = {
 };
 
 const FAVORITES_KEY = "pref:favorite-pairs";
-const isFavoritesShape = (v) => Boolean(v) && typeof v === "object" && !Array.isArray(v);
 const favoriteKey = (m, s) => `${m}:${s}`;
 
 /**
@@ -45,7 +45,7 @@ export default function PairPicker({ symbol, price, priceDirection, overview, ma
   const [query, setQuery] = useState("");
   const [sort, setSort] = usePersistentState("pref:pair-picker-sort", "score", oneOf(Object.keys(SORT_FNS)));
   const [category, setCategory] = usePersistentState("pref:pair-picker-category", "all", oneOf(CATEGORY_CHIPS.map(([id]) => id)));
-  const [favorites, setFavorites] = usePersistentState(FAVORITES_KEY, {}, isFavoritesShape);
+  const [favorites, setFavorites] = useFavorites("pairs", FAVORITES_KEY);
   const [editingNote, setEditingNote] = useState(null); // favorite key currently being annotated
   const [noteDraft, setNoteDraft] = useState("");
   const rootRef = useRef(null);

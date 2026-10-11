@@ -2359,6 +2359,19 @@ button.mini-symbol:hover, button.mini-symbol[aria-expanded="true"] { border-colo
 .sa-plan-grid span { color: var(--text-faint); font-size: 10.5px; text-transform: uppercase; }
 .sa-plan-grid b { font-family: var(--font-mono); font-size: 13px; }
 .sa-plan-grid em { color: var(--text-faint); font-style: normal; font-size: 11px; }
+/* ---- favorite stocks ---- */
+.stock-favs { align-items: center; display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.stock-favs-label { color: var(--hold); font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }
+.stock-fav-chip { align-items: center; background: var(--surface-2); border: 1px solid var(--border); border-radius: 999px; display: inline-flex; }
+.stock-fav-chip.is-current { border-color: var(--accent); }
+.stock-fav-chip button { background: transparent; border: 0; color: var(--text-primary); cursor: pointer; font-size: 12px; font-weight: 600; padding: 3px 4px 3px 10px; }
+.stock-fav-chip button.stock-fav-remove { color: var(--text-faint); font-size: 10px; font-weight: 400; padding: 3px 9px 3px 2px; }
+.stock-fav-chip button.stock-fav-remove:hover { color: var(--sell); }
+.stock-result-wrap { align-items: stretch; display: flex; }
+.stock-result-wrap .stock-result { flex: 1; min-width: 0; }
+.stock-fav-star, .stock-fav-toggle { background: transparent; border: 0; color: var(--text-faint); cursor: pointer; font-size: 15px; line-height: 1; padding: 0 8px; }
+.stock-fav-star:hover, .stock-fav-toggle:hover, .stock-fav-star.is-on, .stock-fav-toggle.is-on { color: var(--hold); }
+.stock-fav-toggle { font-size: 18px; padding: 0 6px 0 0; vertical-align: -1px; }
 .sa-warnings { background: rgba(224, 170, 72, 0.08); border: 1px solid rgba(224, 170, 72, 0.4); border-radius: var(--radius); color: #f0c880; font-size: 12px; line-height: 1.5; margin: 0; padding: 8px 14px 8px 28px; }
 /* ---- Company phase ---- */
 .sa-phase { background: var(--surface-2); border: 1px solid var(--border-soft); border-radius: var(--radius); display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; }

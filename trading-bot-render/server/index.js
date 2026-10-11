@@ -7,6 +7,7 @@ import { FuturesManager } from "./futures.js";
 import { Notifier } from "./notifier.js";
 import { OrderManager } from "./orders.js";
 import { createStore } from "./store.js";
+import { Favorites } from "./favorites.js";
 
 const production = process.env.NODE_ENV === "production";
 const password = process.env.APP_PASSWORD;
@@ -71,11 +72,14 @@ const bots = createBots(STRATEGIES, {
 });
 await bots.init();
 
+const favorites = new Favorites({ store });
+
 const { app } = createApp({
   orderManager: manager,
   futuresManager,
   bots,
   notifier,
+  favorites,
   storage: store.kind,
   auth: password ? { username: process.env.APP_USERNAME || "admin", password } : undefined,
 });

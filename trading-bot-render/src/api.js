@@ -171,6 +171,10 @@ async function sendJson(path, method, body) {
   return res.json();
 }
 
+// ---- favorites (pairs and stocks, kept on the server) ----
+export const getFavorites = () => getJson("/favorites");
+export const saveFavorites = (kind, map) => sendJson(`/favorites/${kind}`, "PUT", map);
+
 export const updateRisk = (patch, market = "spot") => sendJson(`/risk?market=${market}`, "PUT", patch);
 export const resetRiskDrawdown = (market = "spot") => sendJson(`/risk/reset-drawdown?market=${market}`, "POST");
 

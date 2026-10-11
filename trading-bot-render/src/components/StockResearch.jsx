@@ -6,6 +6,7 @@ import { analyzeCompany, bigMoney, combinedRead } from "../../shared/analysis/co
 import { PHASES } from "../../shared/analysis/phase.js";
 import { sma, toCandles } from "../../shared/analysis/index.js";
 import { usePersistentState, oneOf } from "../lib/persist.js";
+import { useFavorites } from "../lib/favorites.js";
 import { getStockCompany, getStockHistory, searchStocks } from "../api.js";
 
 const money = (n, digits = 2) => (n == null || !Number.isFinite(Number(n)) ? "—" : `${Number(n) < 0 ? "−" : ""}${Math.abs(Number(n)).toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits })}`);
@@ -299,7 +300,18 @@ export default function StockResearch({ symbol, onPick, holdings = [] }) {
   const [error, setError] = useState(null);
   const [companyError, setCompanyError] = useState(null);
   const [tab, setTab] = usePersistentState("pref:stock-research-tab", "chart", oneOf(["chart", "company"]));
+  const [favorites, setFavorites, favoritesSync] = useFavorites("stocks", "pref:favorite-stocks");
   const rootRef = useRef(null);
+
+  const favoriteList = useMemo(() => Object.values(favorites).sort((a, b) => b.addedAt - a.addedAt), [favorites]);
+  const toggleFavorite = (ticker) => setFavorites((previous) => {
+    if (previous[ticker]) {
+      const next = { ...previous };
+      delete next[ticker];
+      return next;
+    }
+    return { ...previous, [ticker]: { symbol: ticker, note: "", addedAt: Date.now() } };
+  });
 
   // search as you type (debounced); an empty box shows popular tickers
   useEffect(() => {
@@ -367,6 +379,19 @@ export default function StockResearch({ symbol, onPick, holdings = [] }) {
         </div>
       </div>
 
+      {favoriteList.length > 0 && (
+        <div className="stock-favs" role="group" aria-label="Favorite stocks">
+          <span className="stock-favs-label">★ Favorites</span>
+          {favoriteList.map((f) => (
+            <span key={f.symbol} className={`stock-fav-chip${f.symbol === symbol ? " is-current" : ""}`}>
+              <button type="button" onClick={() => pick(f.symbol)} title={f.note || `Open ${f.symbol}`}>{f.symbol}</button>
+              <button type="button" className="stock-fav-remove" onClick={() => toggleFavorite(f.symbol)} aria-label={`Remove ${f.symbol} from favorites`} title="Remove from favorites">✕</button>
+            </span>
+          ))}
+        </div>
+      )}
+      {favoritesSync.error && <p className="order-error">{favoritesSync.error}</p>}
+
       <div className="stock-search" ref={rootRef}>
         <input
           type="search"
@@ -383,12 +408,15 @@ export default function StockResearch({ symbol, onPick, holdings = [] }) {
           <div className="stock-results" role="listbox">
             <p className="cpm-note">{query ? (searching ? "Searching…" : `${results.length} match${results.length === 1 ? "" : "es"} on Binance Stocks`) : "Popular on Binance Stocks · about 7,900 tickers are listed"}</p>
             {results.map((r) => (
-              <button type="button" role="option" aria-selected={r.symbol === symbol} key={r.symbol} className={`stock-result${r.symbol === symbol ? " is-current" : ""}`} onClick={() => pick(r.symbol)}>
-                <strong>{r.symbol}</strong>
-                <span className="stock-result-name">{r.name ?? ""}</span>
-                {r.type === "ETF" && <i className="cat-badge cat-other">ETF</i>}
-                {!String(r.tradability).includes("BUY") && <i className="cat-badge cat-commodity">{r.tradability === "SELL" ? "sell only" : "closed"}</i>}
-              </button>
+              <div className="stock-result-wrap" key={r.symbol}>
+                <button type="button" role="option" aria-selected={r.symbol === symbol} className={`stock-result${r.symbol === symbol ? " is-current" : ""}`} onClick={() => pick(r.symbol)}>
+                  <strong>{r.symbol}</strong>
+                  <span className="stock-result-name">{r.name ?? ""}</span>
+                  {r.type === "ETF" && <i className="cat-badge cat-other">ETF</i>}
+                  {!String(r.tradability).includes("BUY") && <i className="cat-badge cat-commodity">{r.tradability === "SELL" ? "sell only" : "closed"}</i>}
+                </button>
+                <button type="button" className={`stock-fav-star${favorites[r.symbol] ? " is-on" : ""}`} onClick={() => toggleFavorite(r.symbol)} aria-pressed={Boolean(favorites[r.symbol])} aria-label={favorites[r.symbol] ? `Remove ${r.symbol} from favorites` : `Add ${r.symbol} to favorites`} title={favorites[r.symbol] ? "Remove from favorites" : "Add to favorites"}>{favorites[r.symbol] ? "★" : "☆"}</button>
+              </div>
             ))}
             {!searching && query && results.length === 0 && <p className="cpm-note">Nothing on Binance Stocks matches “{query}”. Try the ticker.</p>}
           </div>
@@ -408,7 +436,10 @@ export default function StockResearch({ symbol, onPick, holdings = [] }) {
         <div className="stock-analysis">
           <div className="sa-head">
             <div>
-              <h3>{symbol}{name ? <span> · {name}</span> : null}</h3>
+              <h3>
+                <button type="button" className={`stock-fav-toggle${favorites[symbol] ? " is-on" : ""}`} onClick={() => toggleFavorite(symbol)} aria-pressed={Boolean(favorites[symbol])} title={favorites[symbol] ? "Remove from favorites" : "Add to favorites"}>{favorites[symbol] ? "★" : "☆"}</button>
+                {symbol}{name ? <span> · {name}</span> : null}
+              </h3>
               <p className="sa-meta">{history?.exchange ?? ""}{history?.type ? ` · ${history.type}` : ""}{price != null ? ` · ${money(price)} USD` : ""}{held ? ` · you hold ${held.quantity.toFixed(4)}` : ""}</p>
             </div>
             <div className="sa-scores">

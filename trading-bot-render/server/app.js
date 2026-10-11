@@ -78,7 +78,7 @@ function parseMode(value) {
   return assertMode(mode);
 }
 
-export function createApp({ orderManager, futuresManager = null, stocksClient = null, stockData = null, news = null, bots = null, notifier = null, amdHistory = null, auth, storage = "file", marketCaps = createMarketCaps() }) {
+export function createApp({ orderManager, futuresManager = null, stocksClient = null, stockData = null, news = null, bots = null, notifier = null, amdHistory = null, favorites = null, agent = null, auth, storage = "file", marketCaps = createMarketCaps() }) {
   const app = express();
   app.disable("x-powered-by");
   app.set("trust proxy", 1); // Render terminates TLS in front of the service
@@ -680,6 +680,16 @@ export function createApp({ orderManager, futuresManager = null, stocksClient = 
     }
     return result;
   }));
+
+  // ---- favorite pairs and stocks (kept on the server, so every device, the bot and the MCP tools share them) ----
+  const favs = () => {
+    if (!favorites) throw Object.assign(new Error("Favorites are not available on this server"), { httpStatus: 503 });
+    return favorites;
+  };
+  api.get("/favorites", handle(500, () => favs().get()));
+  api.put("/favorites/:kind", handle(400, (req) => favs().set(req.params.kind, req.body)));
+  api.post("/favorites/:kind", handle(400, (req) => favs().add(req.params.kind, req.body)));
+  api.delete("/favorites/:kind/:key", handle(400, (req) => favs().remove(req.params.kind, req.params.key)));
 
   app.use("/api", api);
   app.use("/api", (_req, res) => res.status(404).json({ detail: "Not found" }));
