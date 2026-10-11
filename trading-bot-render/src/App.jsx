@@ -10,6 +10,7 @@ import NewsPanel from "./components/NewsPanel.jsx";
 import NotificationCenter from "./components/NotificationCenter.jsx";
 import { usePersistentState, oneOf } from "./lib/persist.js";
 import StocksPanel from "./components/StocksPanel.jsx";
+import AgentPanel from "./components/AgentPanel.jsx";
 import PerformancePanel from "./components/PerformancePanel.jsx";
 import { getAccountMode, getFuturesAccount, getFuturesOrders, getMarketOverview, getPrice, getRisk, resetRiskDrawdown, updateRisk, getBalance, getBinanceOpenOrders, getCandles, getOrders, getStatus, setAccountMode } from "./api.js";
 
@@ -462,6 +463,7 @@ export default function App() {
 
       {view === "stocks" && <StocksPanel />}
       {view === "news" && <NewsPanel timeZone={timeZone} />}
+      {view === "agent" && <AgentPanel />}
       {view === "strategies" && <StrategiesPanel risk={risk} timeZone={timeZone} chartStrategies={chartStrategies} onShowOnChart={showStrategyOnChart} />}
       {view === "performance" && <PerformancePanel mode={mode} timeZone={timeZone} />}
       {view === "charts" && <MultiChart mode={mode} timeZone={timeZone} onOpen={openFromCharts} />}

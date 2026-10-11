@@ -691,6 +691,16 @@ export function createApp({ orderManager, futuresManager = null, stocksClient = 
   api.post("/favorites/:kind", handle(400, (req) => favs().add(req.params.kind, req.body)));
   api.delete("/favorites/:kind/:key", handle(400, (req) => favs().remove(req.params.kind, req.params.key)));
 
+  // ---- AI agent + Telegram bot: settings, status, a test message, and a way to try the agent from the page ----
+  const agentService = () => {
+    if (!agent) throw Object.assign(new Error("The AI agent is not available on this server"), { httpStatus: 503 });
+    return agent;
+  };
+  api.get("/agent", handle(500, () => agentService().status()));
+  api.put("/agent", handle(400, (req) => agentService().save(req.body)));
+  api.post("/agent/test-telegram", handle(400, () => agentService().testTelegram()));
+  api.post("/agent/try", handle(400, (req) => agentService().tryAgent(req.body?.text)));
+
   app.use("/api", api);
   app.use("/api", (_req, res) => res.status(404).json({ detail: "Not found" }));
 

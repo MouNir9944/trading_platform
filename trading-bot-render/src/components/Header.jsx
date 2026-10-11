@@ -48,6 +48,7 @@ export default function Header({
         <button type="button" className={view === "performance" ? "is-active" : ""} onClick={() => onViewChange("performance")}>Performance</button>
         <button type="button" className={view === "news" ? "is-active" : ""} onClick={() => onViewChange("news")}>News</button>
         <button type="button" className={view === "strategies" ? "is-active" : ""} onClick={() => onViewChange("strategies")}>Strategies</button>
+        <button type="button" className={view === "agent" ? "is-active" : ""} onClick={() => onViewChange("agent")}>AI agent</button>
       </div>
 
       {view === "trading" && <PairPicker symbol={symbol} price={price} priceDirection={priceDirection} overview={overview} market={market} onMarketChange={onMarketChange} onSelect={onSymbolChange} />}

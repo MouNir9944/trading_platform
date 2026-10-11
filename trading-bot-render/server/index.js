@@ -8,6 +8,8 @@ import { Notifier } from "./notifier.js";
 import { OrderManager } from "./orders.js";
 import { createStore } from "./store.js";
 import { Favorites } from "./favorites.js";
+import { AgentService } from "./agent/service.js";
+import { httpApi } from "./agent/tools.js";
 
 const production = process.env.NODE_ENV === "production";
 const password = process.env.APP_PASSWORD;
@@ -74,30 +76,41 @@ await bots.init();
 
 const favorites = new Favorites({ store });
 
+const port = Number(process.env.PORT || 8000);
+// The agent talks to this server over its own HTTP API, so it is held to the same login and risk rules as the dashboard.
+const agent = new AgentService({
+  store,
+  env: process.env,
+  getApi: () => httpApi({ baseUrl: `http://127.0.0.1:${port}`, username: process.env.APP_USERNAME || "admin", password }),
+});
+await agent.init();
+
 const { app } = createApp({
   orderManager: manager,
   futuresManager,
   bots,
   notifier,
   favorites,
+  agent,
   storage: store.kind,
   auth: password ? { username: process.env.APP_USERNAME || "admin", password } : undefined,
 });
 
-const port = Number(process.env.PORT || 8000);
 const server = app.listen(port, "0.0.0.0", () => {
   console.log(`Trading dashboard listening on :${port} (storage: ${store.kind})`);
   manager.start();
   futuresManager.start();
   bots.start();
+  agent.restart(); // starts the Telegram bot if it is switched on and fully set up
 });
 
 async function shutdown() {
   manager.stop();
   futuresManager.stop();
   bots.stop();
+  agent.stop();
   server.close();
-  await Promise.race([Promise.all([manager.flush(), futuresManager.flush(), bots.flush(), notifier.flush()]).then(() => store.close()), new Promise((r) => setTimeout(r, 4000))]);
+  await Promise.race([Promise.all([manager.flush(), futuresManager.flush(), bots.flush(), notifier.flush(), agent.flush()]).then(() => store.close()), new Promise((r) => setTimeout(r, 4000))]);
   process.exit(0);
 }
 process.on("SIGTERM", shutdown);

@@ -2359,6 +2359,68 @@ button.mini-symbol:hover, button.mini-symbol[aria-expanded="true"] { border-colo
 .sa-plan-grid span { color: var(--text-faint); font-size: 10.5px; text-transform: uppercase; }
 .sa-plan-grid b { font-family: var(--font-mono); font-size: 13px; }
 .sa-plan-grid em { color: var(--text-faint); font-style: normal; font-size: 11px; }
+/* ---- AI agent page ---- */
+.agent-view { display: grid; gap: 16px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin: 12px 0 84px; }
+.agent-view .agent-wide { grid-column: 1 / -1; }
+@media (max-width: 1000px) { .agent-view { grid-template-columns: 1fr; } }
+.agent-view .panel { display: flex; flex-direction: column; gap: 10px; }
+.agent-view code { background: var(--surface-3); border-radius: 4px; font-size: 12px; padding: 1px 5px; }
+.agent-error { grid-column: 1 / -1; margin: 0; }
+.agent-hint { color: var(--text-faint); font-size: 12px; line-height: 1.5; margin: 0; }
+.agent-bad { color: #f58a8a; font-size: 12px; line-height: 1.5; margin: 0; }
+.agent-pill { border: 1px solid var(--border); border-radius: 999px; font-size: 12px; font-weight: 600; padding: 4px 12px; white-space: nowrap; }
+.agent-pill.is-on { background: rgba(53, 196, 140, 0.14); border-color: rgba(53, 196, 140, 0.5); color: #5fdba5; }
+.agent-pill.is-off { color: var(--text-muted); }
+.agent-steps { counter-reset: step; display: flex; flex-direction: column; gap: 10px; list-style: none; margin: 0; padding: 0; }
+.agent-step { align-items: flex-start; color: var(--text-muted); display: flex; font-size: 13px; gap: 10px; line-height: 1.5; }
+.agent-step-mark { color: var(--text-faint); flex: none; font-size: 15px; width: 18px; }
+.agent-step.is-done .agent-step-mark { color: #5fdba5; }
+.agent-step strong { color: var(--text-primary); }
+.agent-row { align-items: center; display: flex; flex-wrap: wrap; gap: 8px 10px; }
+.agent-row > input { flex: 1 1 220px; min-width: 0; }
+.agent-view input[type="text"], .agent-view input:not([type]), .agent-view select, .agent-view textarea {
+  background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm, 6px); color: var(--text-primary); font: inherit; font-size: 13px; padding: 7px 10px;
+}
+.agent-view textarea { resize: vertical; width: 100%; }
+.agent-view input:focus, .agent-view select:focus, .agent-view textarea:focus { border-color: var(--accent); outline: none; }
+.agent-field { color: var(--text-muted); display: flex; flex-direction: column; font-size: 12px; gap: 5px; }
+.agent-big-switch { color: var(--text-primary); font-size: 13px; }
+.agent-big-switch.is-disabled { opacity: 0.5; }
+.agent-ids { display: flex; flex-wrap: wrap; gap: 6px; }
+.agent-id { background: var(--surface-3); border-radius: 999px; font-family: var(--font-mono); font-size: 12px; padding: 3px 4px 3px 10px; }
+.agent-id button { background: transparent; border: 0; color: var(--text-faint); cursor: pointer; font-size: 10px; padding: 2px 6px; }
+.agent-id button:hover { color: var(--sell); }
+.agent-models { display: grid; gap: 8px; }
+.agent-model { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer; display: grid; gap: 2px 10px; grid-template-columns: auto 1fr; padding: 9px 12px; }
+.agent-model.is-on { border-color: var(--accent); }
+.agent-model input { accent-color: var(--accent); grid-row: span 2; }
+.agent-model span { color: var(--text-muted); font-size: 12px; }
+.agent-tool-groups { display: grid; gap: 18px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+@media (max-width: 1000px) { .agent-tool-groups { grid-template-columns: 1fr; } }
+.agent-tool-group h4 { font-size: 13px; margin: 0 0 4px; }
+.agent-tool-group ul { display: flex; flex-direction: column; gap: 6px; list-style: none; margin: 10px 0 0; padding: 0; }
+.agent-trade-switches { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.agent-live-confirm { background: rgba(232, 96, 76, 0.08); border: 1px solid rgba(232, 96, 76, 0.45); border-radius: var(--radius); padding: 8px 10px; }
+.agent-ask { flex: none; }
+.agent-reply { background: var(--surface-2); border-left: 3px solid var(--accent); border-radius: var(--radius); font-size: 13px; line-height: 1.55; padding: 10px 14px; white-space: pre-wrap; }
+.agent-reply p { margin: 0; }
+.agent-would { color: #f0c880; margin-top: 8px; }
+.agent-would ul { margin: 4px 0 0; padding-left: 18px; }
+.agent-code { background: var(--bg); border: 1px solid var(--border-soft); border-radius: var(--radius); display: flex; gap: 10px; justify-content: space-between; padding: 8px 12px; }
+.agent-code pre { font-family: var(--font-mono); font-size: 12px; margin: 0; overflow-x: auto; white-space: pre; }
+.agent-log { border-collapse: collapse; font-size: 12px; width: 100%; }
+.agent-log td { border-top: 1px solid var(--border-soft); color: var(--text-muted); padding: 5px 8px; vertical-align: top; }
+.agent-log td:first-child { color: var(--text-faint); white-space: nowrap; }
+.agent-log tr.is-confirmed td b, .agent-log tr.is-started td b { color: #5fdba5; }
+.agent-log tr.is-denied td b, .agent-log tr.is-error td b, .agent-log tr.is-tool_error td b, .agent-log tr.is-confirm_failed td b { color: #f58a8a; }
+.agent-log tr.is-proposal td b { color: #f0c880; }
+.agent-view .secondary-button { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm, 6px); color: var(--text-primary); cursor: pointer; font-size: 13px; padding: 7px 14px; }
+.agent-view .secondary-button:hover:not(:disabled) { border-color: var(--accent); }
+.agent-view .secondary-button:disabled { cursor: not-allowed; opacity: 0.5; }
+.agent-savebar { align-items: center; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); bottom: 14px; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.4); display: flex; font-size: 13px; gap: 10px; justify-content: flex-end; left: 50%; max-width: 760px; padding: 10px 14px; position: fixed; transform: translateX(-50%); width: calc(100% - 32px); z-index: 20; color: var(--text-muted); }
+.agent-savebar span { flex: 1; }
+.agent-savebar.is-dirty { border-color: var(--accent); color: var(--text-primary); }
+
 /* ---- favorite stocks ---- */
 .stock-favs { align-items: center; display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
 .stock-favs-label { color: var(--hold); font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; }

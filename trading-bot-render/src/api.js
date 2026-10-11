@@ -171,6 +171,12 @@ async function sendJson(path, method, body) {
   return res.json();
 }
 
+// ---- AI agent and Telegram bot ----
+export const getAgent = () => getJson("/agent");
+export const saveAgent = (settings) => sendJson("/agent", "PUT", settings);
+export const testAgentTelegram = () => sendJson("/agent/test-telegram", "POST", {});
+export const tryAgent = (text) => sendJson("/agent/try", "POST", { text });
+
 // ---- favorites (pairs and stocks, kept on the server) ----
 export const getFavorites = () => getJson("/favorites");
 export const saveFavorites = (kind, map) => sendJson(`/favorites/${kind}`, "PUT", map);
