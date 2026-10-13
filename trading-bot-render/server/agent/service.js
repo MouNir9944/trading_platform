@@ -13,6 +13,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 
 import { Agent } from "./agent.js";
+import { SECRETS, SecretVault } from "./secrets.js";
 import { createStt } from "./stt.js";
 import { TOOLS, ToolError, offeredTools } from "./tools.js";
 import { TelegramBot } from "./telegram.js";
@@ -99,7 +100,8 @@ export class AgentService {
    * @param fetchFn    fetch, replaceable in tests
    * @param anthropic  optional ready-made client (tests)
    */
-  constructor({ store, env = process.env, getApi, fetchFn = fetch, anthropic = null, now = Date.now }) {
+  constructor({ store, env = process.env, getApi, fetchFn = fetch, anthropic = null, vault = null, now = Date.now }) {
+    const self = this;
     this.store = store;
     this.env = env;
     this.getApi = getApi;
@@ -111,7 +113,15 @@ export class AgentService {
     this.bot = null;
     this.lastError = null;
     this.client = null;
-    this.stt = createStt({ env, fetchFn });
+    this.vault = vault ?? new SecretVault({ store, passphrase: env.APP_PASSWORD ?? "", env });
+    this.sttCache = { key: null, stt: null };
+    // The bot keeps this object, so it always speaks to whichever speech key is current.
+    this.stt = {
+      get configured() { return self.speechService().configured; },
+      get model() { return self.speechService().model; },
+      get base() { return self.speechService().base; },
+      transcribe: (...args) => self.speechService().transcribe(...args),
+    };
     this.writeTimer = null;
     this.agent = new Agent({
       getClient: () => this.#client(),
@@ -123,6 +133,7 @@ export class AgentService {
   }
 
   async init() {
+    await this.vault.load();
     const saved = await this.store.getSetting("agent_config");
     if (saved && typeof saved === "object") {
       // what is saved was already confirmed when it was saved (including the word LIVE), so it is not asked for again
@@ -134,8 +145,17 @@ export class AgentService {
 
   #client() {
     if (this.injectedClient) return this.injectedClient;
-    if (!this.env.ANTHROPIC_API_KEY) throw new ToolError("The server has no ANTHROPIC_API_KEY, so the agent cannot think yet.");
-    return (this.client ??= new Anthropic({ apiKey: this.env.ANTHROPIC_API_KEY }));
+    const apiKey = this.vault.get("anthropic");
+    if (!apiKey) throw new ToolError("No Claude API key yet: add it on the AI agent page.");
+    if (this.client?.key !== apiKey) this.client = { key: apiKey, sdk: new Anthropic({ apiKey }) };
+    return this.client.sdk;
+  }
+
+  /** The speech-to-text service for the key in use now (rebuilt only when the key changes). */
+  speechService() {
+    const key = this.vault.get("speech") || this.env.OPENAI_API_KEY || ""; // OPENAI_API_KEY is the older fallback
+    if (this.sttCache.key !== key || !this.sttCache.stt) this.sttCache = { key, stt: createStt({ env: { ...this.env, STT_API_KEY: key, OPENAI_API_KEY: "" }, fetchFn: this.fetchFn }) };
+    return this.sttCache.stt;
   }
 
   /** Every Telegram user ID allowed to talk to the bot: the settings, plus the environment. */
@@ -159,8 +179,11 @@ export class AgentService {
     await this.store.setSetting("agent_audit", this.log).catch(() => {});
   }
 
+  /** For each key: is it set, where from, and its last four characters. Never the key. */
   secrets() {
-    return { telegram: Boolean(this.env.TELEGRAM_BOT_TOKEN), anthropic: Boolean(this.env.ANTHROPIC_API_KEY), speech: this.stt.configured };
+    const out = Object.fromEntries(Object.keys(SECRETS).map((name) => [name, this.vault.describe(name)]));
+    if (!out.speech.set && this.env.OPENAI_API_KEY) out.speech = { set: true, source: "environment", hint: null };
+    return out;
   }
 
   status() {
@@ -168,6 +191,8 @@ export class AgentService {
       config: this.config,
       secrets: this.secrets(),
       speech: { model: this.stt.model, service: this.stt.base },
+      secretLabels: Object.fromEntries(Object.entries(SECRETS).map(([name, s]) => [name, { label: s.label, hint: s.hint, env: s.env }])),
+      canStoreKeys: Boolean(this.env.APP_PASSWORD),
       bot: { running: Boolean(this.bot?.running), username: this.bot?.username ?? null, error: this.bot?.error ?? this.lastError, startedAt: this.bot?.startedAt ?? null },
       pendingConfirmations: this.agent.pendingCount(),
       allowedCount: this.allowedIds().size,
@@ -185,11 +210,12 @@ export class AgentService {
     this.lastError = null;
     const c = this.config;
     if (!c.enabled) return;
-    if (!this.env.TELEGRAM_BOT_TOKEN) { this.lastError = "TELEGRAM_BOT_TOKEN is not set on the server."; return; }
+    const token = this.vault.get("telegram");
+    if (!token) { this.lastError = "Add your Telegram bot token first."; return; }
+    if (!this.vault.get("anthropic") && !this.injectedClient) { this.lastError = "Add your Claude API key first."; return; }
     if (this.allowedIds().size === 0) { this.lastError = "Add your Telegram user ID first: nobody is allowed to talk to the bot yet."; return; }
-    if (!this.env.ANTHROPIC_API_KEY && !this.injectedClient) { this.lastError = "ANTHROPIC_API_KEY is not set on the server."; return; }
     const bot = new TelegramBot({
-      token: this.env.TELEGRAM_BOT_TOKEN, agent: this.agent, stt: this.stt, getConfig: async () => this.config,
+      token, agent: this.agent, stt: this.stt, getConfig: async () => this.config,
       allowedIds: () => this.allowedIds(), audit: (e) => this.audit(e), fetchFn: this.fetchFn, now: this.now,
     });
     this.bot = bot;
@@ -216,10 +242,25 @@ export class AgentService {
     return this.status();
   }
 
+  /**
+   * Save, replace or remove keys: `{ telegram?, anthropic?, speech? }`, each a string (set) or "" / null (remove).
+   * The keys are never returned; the status only says whether each is set.
+   */
+  async saveSecrets(patch) {
+    if (!patch || typeof patch !== "object" || Array.isArray(patch)) throw bad("send the keys as an object");
+    const names = Object.keys(patch);
+    if (!names.length) throw bad("no key was given");
+    for (const name of names) if (!SECRETS[name]) throw bad(`unknown key ${name}`);
+    for (const name of names) await this.vault.set(name, patch[name]);
+    this.audit({ type: "settings", detail: names.map((n) => `${SECRETS[n].label} ${patch[n] ? "saved" : "removed"}`).join(", ") });
+    await this.restart();
+    return this.status();
+  }
+
   /** Send a message to the first allowed user, so the owner can see the bot is wired up. */
   async testTelegram() {
-    const token = this.env.TELEGRAM_BOT_TOKEN;
-    if (!token) throw bad("TELEGRAM_BOT_TOKEN is not set on the server.");
+    const token = this.vault.get("telegram");
+    if (!token) throw bad("Add your Telegram bot token first.");
     const [id] = [...this.allowedIds()];
     if (!id) throw bad("Add your Telegram user ID first.");
     const res = await this.fetchFn(`https://api.telegram.org/bot${token}/sendMessage`, {

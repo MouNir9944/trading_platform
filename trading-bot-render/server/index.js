@@ -10,6 +10,7 @@ import { createStore } from "./store.js";
 import { Favorites } from "./favorites.js";
 import { AgentService } from "./agent/service.js";
 import { httpApi } from "./agent/tools.js";
+import { SecretVault } from "./agent/secrets.js";
 
 const production = process.env.NODE_ENV === "production";
 const password = process.env.APP_PASSWORD;
@@ -81,6 +82,7 @@ const port = Number(process.env.PORT || 8000);
 const agent = new AgentService({
   store,
   env: process.env,
+  vault: new SecretVault({ store, passphrase: password ?? "", env: process.env }),
   getApi: () => httpApi({ baseUrl: `http://127.0.0.1:${port}`, username: process.env.APP_USERNAME || "admin", password }),
 });
 await agent.init();

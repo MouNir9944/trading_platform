@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { getAgent, saveAgent, testAgentTelegram, tryAgent } from "../api.js";
+import { getAgent, saveAgent, saveAgentSecrets, testAgentTelegram, tryAgent } from "../api.js";
 
 const EFFORTS = [["low", "Quick"], ["medium", "Balanced"], ["high", "Thorough"]];
 const LANGUAGES = [["", "Detect automatically"], ["en", "English"], ["fr", "Français"], ["ar", "العربية"], ["es", "Español"], ["de", "Deutsch"], ["it", "Italiano"], ["pt", "Português"], ["tr", "Türkçe"]];
@@ -20,6 +20,37 @@ function Step({ done, children }) {
       <span className="agent-step-mark" aria-hidden="true">{done ? "✓" : "○"}</span>
       <div>{children}</div>
     </li>
+  );
+}
+
+/**
+ * One key: shows whether it is set (never the key), and lets you paste, replace or remove it. Saved on its own, at once,
+ * because a key is not part of the settings below it.
+ */
+function KeyField({ name, info, spec, canStore, busy, onSave }) {
+  const [value, setValue] = useState("");
+  const [editing, setEditing] = useState(false);
+  const showInput = !info.set || editing;
+  const submit = async () => { if (await onSave(name, value.trim())) { setValue(""); setEditing(false); } };
+  return (
+    <div className="agent-key">
+      {info.set && !editing && (
+        <div className="agent-key-set">
+          <span className="agent-key-ok">{info.source === "page" ? `Saved ${info.hint}` : "Set on the server"}</span>
+          <button type="button" className="link-button" onClick={() => setEditing(true)} disabled={!canStore}>Replace</button>
+          {info.source === "page" && <button type="button" className="link-button" onClick={() => onSave(name, "")} disabled={busy}>Remove</button>}
+        </div>
+      )}
+      {showInput && canStore && (
+        <div className="agent-row">
+          <input type="password" autoComplete="off" spellCheck={false} value={value} onChange={(e) => setValue(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && value.trim()) submit(); }} placeholder={spec.hint} aria-label={spec.label} />
+          <button type="button" className="secondary-button" onClick={submit} disabled={busy || !value.trim()}>Save key</button>
+          {editing && <button type="button" className="link-button" onClick={() => { setEditing(false); setValue(""); }}>Cancel</button>}
+        </div>
+      )}
+      {showInput && !canStore && <p className="agent-bad">To save keys here, set <code>APP_PASSWORD</code> on the server (keys are encrypted with it). Or set <code>{spec.env}</code> there instead.</p>}
+      {info.source === "unreadable" && <p className="agent-bad">A saved key could not be opened because the dashboard password changed. Paste it again.</p>}
+    </div>
   );
 }
 
@@ -86,6 +117,21 @@ export default function AgentPanel() {
     setLiveWord("");
     setNotice(next.config.enabled ? (next.bot.running ? `Saved. The bot is running as @${next.bot.username}.` : `Saved, but the bot is not running: ${next.bot.error ?? "see the checklist"}`) : "Saved. The agent is switched off.");
   });
+  const saveKey = async (name, value) => {
+    setBusy("key");
+    setError(null);
+    try {
+      const next = await saveAgentSecrets({ [name]: value });
+      setStatus(next);
+      setNotice(value ? `${status.secretLabels[name].label} saved.` : `${status.secretLabels[name].label} removed.`);
+      return true;
+    } catch (err) {
+      setError(err.message);
+      return false;
+    } finally {
+      setBusy(null);
+    }
+  };
   const sendTest = () => run("test", async () => { const r = await testAgentTelegram(); setNotice(`Test message sent to Telegram user ${r.sentTo}. Check your phone.`); });
   const ask = () => run("try", async () => { setReply(null); setReply(await tryAgent(question)); });
 
@@ -113,11 +159,13 @@ export default function AgentPanel() {
           <span className={`agent-pill ${bot.running ? "is-on" : "is-off"}`}>{bot.running ? `Running${bot.username ? ` · @${bot.username}` : ""}` : "Not running"}</span>
         </div>
         <ol className="agent-steps">
-          <Step done={secrets.telegram}>
-            <strong>Telegram bot token.</strong> Create a bot with <b>@BotFather</b> in Telegram, then set <code>TELEGRAM_BOT_TOKEN</code> on the server.
+          <Step done={secrets.telegram.set}>
+            <strong>Telegram bot token.</strong> In Telegram, open <b>@BotFather</b>, send <code>/newbot</code>, and paste the token it gives you.
+            <KeyField name="telegram" info={secrets.telegram} spec={status.secretLabels.telegram} canStore={status.canStoreKeys} busy={busy != null} onSave={saveKey} />
           </Step>
-          <Step done={secrets.anthropic}>
-            <strong>Claude API key.</strong> Set <code>ANTHROPIC_API_KEY</code> on the server.
+          <Step done={secrets.anthropic.set}>
+            <strong>Claude API key.</strong> Create one at <b>console.anthropic.com</b> and paste it here.
+            <KeyField name="anthropic" info={secrets.anthropic} spec={status.secretLabels.anthropic} canStore={status.canStoreKeys} busy={busy != null} onSave={saveKey} />
           </Step>
           <Step done={status.allowedCount > 0}>
             <strong>Your Telegram user ID.</strong> Send any message to your bot: it replies with your ID. Add it under “Who can talk to the bot”.
@@ -125,11 +173,12 @@ export default function AgentPanel() {
           <Step done={bot.running}>
             <strong>Switch it on</strong> and press Save.{bot.error ? <span className="agent-bad"> {bot.error}</span> : null}
           </Step>
-          <Step done={secrets.speech}>
-            <strong>Voice messages (optional).</strong> Set <code>STT_API_KEY</code> for speech-to-text. Currently using <code>{status.speech.model}</code>.
+          <Step done={secrets.speech.set}>
+            <strong>Voice messages (optional).</strong> Paste a speech-to-text key (OpenAI by default, using <code>{status.speech.model}</code>).
+            <KeyField name="speech" info={secrets.speech} spec={status.secretLabels.speech} canStore={status.canStoreKeys} busy={busy != null} onSave={saveKey} />
           </Step>
         </ol>
-        <p className="agent-hint">Keys are set as environment variables on the server (the <code>.env</code> file or your hosting settings), then restart it. They are never shown or stored on this page.</p>
+        <p className="agent-hint">Keys are write-only: once saved they are stored encrypted on the server and are never shown again, only the last four characters. You can also set them as environment variables on the server instead.</p>
       </section>
 
       <section className="panel">
@@ -146,7 +195,7 @@ export default function AgentPanel() {
           <button type="button" className="secondary-button" onClick={addId}>Add</button>
         </div>
         <div className="agent-row">
-          <button type="button" className="secondary-button" onClick={sendTest} disabled={busy != null || dirty || !secrets.telegram || status.allowedCount === 0} title={dirty ? "Save your changes first" : "Send a message to the first allowed user"}>{busy === "test" ? "Sending…" : "Send a test message"}</button>
+          <button type="button" className="secondary-button" onClick={sendTest} disabled={busy != null || dirty || !secrets.telegram.set || status.allowedCount === 0} title={dirty ? "Save your changes first" : "Send a message to the first allowed user"}>{busy === "test" ? "Sending…" : "Send a test message"}</button>
           <span className="agent-hint">Open your bot in Telegram and press Start once, or Telegram will not deliver it.</span>
         </div>
       </section>
@@ -179,7 +228,7 @@ export default function AgentPanel() {
         <label className="agent-field">Language you speak
           <select value={draft.voice.language} onChange={(e) => set({ voice: { ...draft.voice, language: e.target.value } })}>{LANGUAGES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select>
         </label>
-        {!secrets.speech && <p className="agent-bad">No speech-to-text key on the server yet: set <code>STT_API_KEY</code> (and optionally <code>STT_BASE_URL</code> / <code>STT_MODEL</code>).</p>}
+        {!secrets.speech.set && <p className="agent-bad">No speech-to-text key yet: paste one in the checklist at the top.</p>}
       </section>
 
       <section className="panel agent-wide">
@@ -217,9 +266,9 @@ export default function AgentPanel() {
         <div className="panel-heading"><div><p className="panel-title">Try it here</p><p className="panel-subtitle">Ask the agent something without Telegram. Orders are shown, never sent. Uses your saved settings.</p></div></div>
         <div className="agent-row">
           <input value={question} onChange={(e) => setQuestion(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && question.trim() && busy == null) ask(); }} placeholder="e.g. What's the BTCUSDT trend on 4h?" aria-label="Ask the agent" maxLength={2000} />
-          <button type="button" className="primary-button agent-ask" onClick={ask} disabled={busy != null || !question.trim() || !secrets.anthropic}>{busy === "try" ? "Thinking…" : "Ask"}</button>
+          <button type="button" className="primary-button agent-ask" onClick={ask} disabled={busy != null || !question.trim() || !secrets.anthropic.set}>{busy === "try" ? "Thinking…" : "Ask"}</button>
         </div>
-        {!secrets.anthropic && <p className="agent-bad">Needs <code>ANTHROPIC_API_KEY</code> on the server.</p>}
+        {!secrets.anthropic.set && <p className="agent-bad">Needs the Claude API key from the checklist at the top.</p>}
         {reply && (
           <div className="agent-reply">
             <p>{reply.text}</p>

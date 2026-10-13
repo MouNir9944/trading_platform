@@ -2402,6 +2402,10 @@ button.mini-symbol:hover, button.mini-symbol[aria-expanded="true"] { border-colo
 .agent-trade-switches { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
 .agent-live-confirm { background: rgba(232, 96, 76, 0.08); border: 1px solid rgba(232, 96, 76, 0.45); border-radius: var(--radius); padding: 8px 10px; }
 .agent-ask { flex: none; }
+.agent-key { margin-top: 6px; }
+.agent-key-set { align-items: center; display: flex; gap: 12px; }
+.agent-key-ok { color: #5fdba5; font-family: var(--font-mono); font-size: 12px; }
+.agent-key input[type="password"] { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm, 6px); color: var(--text-primary); font: inherit; font-size: 13px; padding: 7px 10px; }
 .agent-reply { background: var(--surface-2); border-left: 3px solid var(--accent); border-radius: var(--radius); font-size: 13px; line-height: 1.55; padding: 10px 14px; white-space: pre-wrap; }
 .agent-reply p { margin: 0; }
 .agent-would { color: #f0c880; margin-top: 8px; }
