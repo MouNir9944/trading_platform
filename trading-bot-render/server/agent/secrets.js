@@ -1,13 +1,15 @@
 /**
- * Keys you paste on the Agent page (the Telegram bot token, the Claude API key, the speech-to-text key).
+ * Keys you paste on the Agent page: the Telegram bot token, the speech-to-text key, and one API key per agent.
  *
  * They are write-only: once saved the page can say a key is set and show its last four characters, but nothing can read
  * it back. In the database each key is encrypted (AES-256-GCM) with a key derived from the dashboard password, so a copy
  * of the database alone does not reveal them. The consequence: if you change APP_PASSWORD the saved keys can no longer
  * be opened, and you paste them again.
  *
- * An environment variable (TELEGRAM_BOT_TOKEN, ANTHROPIC_API_KEY, STT_API_KEY) is still honoured as a fallback; a key
- * saved on the page wins over it.
+ * An environment variable (TELEGRAM_BOT_TOKEN, STT_API_KEY, and the provider's own such as ANTHROPIC_API_KEY or
+ * GEMINI_API_KEY) is still honoured as a fallback; a key saved on the page wins over it.
+ *
+ * Names: "telegram", "speech", "anthropic" (the first agent's key, kept from before agents existed) and "agent_<id>".
  */
 import crypto from "node:crypto";
 
@@ -21,6 +23,8 @@ export const SECRETS = {
 };
 
 const SETTING = "agent_secrets";
+const NAME = /^(telegram|anthropic|speech|agent_[a-z0-9]{4,12})$/;
+export const isKeyName = (name) => NAME.test(String(name));
 const derive = (passphrase, salt) => crypto.scryptSync(passphrase, salt, 32);
 
 function seal(value, passphrase) {
@@ -59,29 +63,28 @@ export class SecretVault {
     this.values = {};
     this.unreadable = new Set();
     for (const [name, record] of Object.entries(this.records)) {
-      if (!SECRETS[name]) continue;
+      if (!isKeyName(name)) continue;
       try { this.values[name] = open(record, this.passphrase); } catch { this.unreadable.add(name); } // the password changed
     }
   }
 
-  /** The key to use: the one saved on the page, else the environment's, else "". */
-  get(name) {
-    return this.values[name] || this.env[SECRETS[name]?.env] || "";
+  /** The key to use: the one saved on the page, else the environment's (`envName`), else "". */
+  get(name, envName = SECRETS[name]?.env) {
+    return this.values[name] || (envName ? this.env[envName] : "") || "";
   }
 
   /** Safe to show: never the key itself. */
-  describe(name) {
+  describe(name, envName = SECRETS[name]?.env) {
     if (this.values[name]) return { set: true, source: "page", hint: `…${this.records[name].hint}` };
     if (this.unreadable.has(name)) return { set: false, source: "unreadable", hint: null };
-    if (this.env[SECRETS[name].env]) return { set: true, source: "environment", hint: null };
+    if (envName && this.env[envName]) return { set: true, source: "environment", hint: null };
     return { set: false, source: null, hint: null };
   }
 
-  /** Save a key (or remove it when `value` is empty or null). */
-  set(name, value) {
-    const spec = SECRETS[name];
-    if (!spec) return Promise.reject(bad(`unknown key ${name}`));
+  /** Save a key (or remove it when `value` is empty or null). `spec` ({ label, pattern, hint }) says what a valid one looks like. */
+  set(name, value, spec = SECRETS[name]) {
     const clear = value == null || value === "";
+    if (!isKeyName(name) || (!clear && !spec)) return Promise.reject(bad(`unknown key ${name}`)); // removing a key needs no format
     const text = clear ? "" : String(value).trim();
     if (!clear) {
       if (!this.passphrase) return Promise.reject(bad("Set APP_PASSWORD on the server first: keys saved here are encrypted with it."));

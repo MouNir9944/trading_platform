@@ -700,7 +700,7 @@ export function createApp({ orderManager, futuresManager = null, stocksClient = 
   api.put("/agent", handle(400, (req) => agentService().save(req.body)));
   api.put("/agent/secrets", handle(400, (req) => agentService().saveSecrets(req.body)));
   api.post("/agent/test-telegram", handle(400, () => agentService().testTelegram()));
-  api.post("/agent/try", handle(400, (req) => agentService().tryAgent(req.body?.text)));
+  api.post("/agent/try", handle(400, (req) => agentService().tryAgent(req.body?.text, req.body?.agentId)));
 
   app.use("/api", api);
   app.use("/api", (_req, res) => res.status(404).json({ detail: "Not found" }));

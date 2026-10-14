@@ -176,7 +176,7 @@ export const getAgent = () => getJson("/agent");
 export const saveAgent = (settings) => sendJson("/agent", "PUT", settings);
 export const saveAgentSecrets = (keys) => sendJson("/agent/secrets", "PUT", keys);
 export const testAgentTelegram = () => sendJson("/agent/test-telegram", "POST", {});
-export const tryAgent = (text) => sendJson("/agent/try", "POST", { text });
+export const tryAgent = (text, agentId) => sendJson("/agent/try", "POST", { text, agentId });
 
 // ---- favorites (pairs and stocks, kept on the server) ----
 export const getFavorites = () => getJson("/favorites");

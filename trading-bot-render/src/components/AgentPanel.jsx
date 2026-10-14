@@ -48,8 +48,53 @@ function KeyField({ name, info, spec, canStore, busy, onSave }) {
           {editing && <button type="button" className="link-button" onClick={() => { setEditing(false); setValue(""); }}>Cancel</button>}
         </div>
       )}
-      {showInput && !canStore && <p className="agent-bad">To save keys here, set <code>APP_PASSWORD</code> on the server (keys are encrypted with it). Or set <code>{spec.env}</code> there instead.</p>}
+      {showInput && !canStore && <p className="agent-bad">To save keys here, set <code>APP_PASSWORD</code> on the server (keys are encrypted with it).{spec.env ? <> Or set <code>{spec.env}</code> there instead.</> : null}</p>}
       {info.source === "unreadable" && <p className="agent-bad">A saved key could not be opened because the dashboard password changed. Paste it again.</p>}
+    </div>
+  );
+}
+
+/** One agent: its name, provider, model and key. Edits are part of the settings below and are saved with them. */
+function AgentCard({ agent, saved, provider, providers, active, canRemove, canStore, busy, onChange, onActivate, onRemove, onSaveKey }) {
+  const listId = `models-${agent.id}`;
+  return (
+    <div className={`agent-card${active ? " is-active" : ""}`}>
+      <div className="agent-card-head">
+        <label className="agent-active"><input type="radio" name="agent-active" checked={active} onChange={onActivate} /> {active ? "Active" : "Use this one"}</label>
+        <input className="agent-name" value={agent.name} maxLength={40} onChange={(e) => onChange({ name: e.target.value })} aria-label="Agent name" />
+        {canRemove && <button type="button" className="link-button" onClick={onRemove}>Remove</button>}
+      </div>
+      <div className="agent-card-grid">
+        <label className="agent-field">Provider
+          <select value={agent.provider} onChange={(e) => onChange({ provider: e.target.value, model: providers[e.target.value].defaultModel, baseUrl: "" })}>
+            {Object.entries(providers).map(([id, p]) => <option key={id} value={id}>{p.label}</option>)}
+          </select>
+        </label>
+        <label className="agent-field">Model
+          <input value={agent.model} list={listId} onChange={(e) => onChange({ model: e.target.value })} spellCheck={false} placeholder={provider.defaultModel || "model name"} />
+          <datalist id={listId}>{provider.examples.map((m) => <option key={m} value={m} />)}</datalist>
+        </label>
+        {provider.efforts && (
+          <label className="agent-field">How much it thinks
+            <select value={agent.effort} onChange={(e) => onChange({ effort: e.target.value })}>{EFFORTS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select>
+          </label>
+        )}
+        {provider.customUrl && (
+          <label className="agent-field agent-url">Server address{provider.urlRequired ? "" : " (optional)"}
+            <input value={agent.baseUrl} onChange={(e) => onChange({ baseUrl: e.target.value })} spellCheck={false} placeholder={provider.baseUrl || "https://your-server/v1"} />
+          </label>
+        )}
+      </div>
+      {(provider.needsKey || provider.customUrl) && (
+        saved ? (
+          <div className="agent-card-key">
+            <span className="agent-hint">API key{provider.needsKey ? "" : " (only if your server asks for one)"}:</span>
+            <KeyField name={`agent:${agent.id}`} info={saved.key.source === "none" ? { set: false, source: null, hint: null } : saved.key} spec={{ label: `${agent.name} API key`, hint: provider.keyHint, env: provider.keyEnv }} canStore={canStore} busy={busy} onSave={onSaveKey} />
+            {saved.key.source === "environment" && <span className="agent-hint">Using <code>{provider.keyEnv}</code> from the server.</span>}
+          </div>
+        ) : <p className="agent-hint">Save your changes first, then paste this agent's key here. {provider.keyHint}</p>
+      )}
+      {!provider.needsKey && !provider.customUrl && <p className="agent-hint">No key needed.</p>}
     </div>
   );
 }
@@ -79,6 +124,7 @@ export default function AgentPanel() {
   const [liveWord, setLiveWord] = useState("");
   const [question, setQuestion] = useState("");
   const [reply, setReply] = useState(null);
+  const [tryId, setTryId] = useState("");
 
   const load = useCallback(() => getAgent().then((s) => { setStatus(s); setDraft((d) => d ?? s.config); setError(null); }).catch((err) => setError(err.message)), []);
   useEffect(() => {
@@ -95,6 +141,17 @@ export default function AgentPanel() {
 
   const toolOn = (name) => draft?.tools?.[name] !== false;
   const setTool = (name, on) => set({ tools: Object.fromEntries(Object.entries({ ...draft.tools, [name]: on }).filter(([, v]) => v === false)) });
+
+  const updateAgent = (id, patch) => set({ agents: draft.agents.map((a) => (a.id === id ? { ...a, ...patch } : a)) });
+  const removeAgent = (id) => {
+    const agents = draft.agents.filter((a) => a.id !== id);
+    set({ agents, activeAgentId: draft.activeAgentId === id ? agents[0].id : draft.activeAgentId });
+  };
+  const addAgent = () => {
+    const first = status.providers.gemini;
+    const id = (crypto.randomUUID?.() ?? `${Date.now()}${Math.random()}`).replace(/[^a-z0-9]/g, "").slice(0, 8).padEnd(8, "x");
+    set({ agents: [...draft.agents, { id, name: "Gemini", provider: "gemini", model: first.defaultModel, baseUrl: "", effort: "medium" }] });
+  };
 
   const addId = () => {
     const id = idInput.trim();
@@ -121,9 +178,11 @@ export default function AgentPanel() {
     setBusy("key");
     setError(null);
     try {
-      const next = await saveAgentSecrets({ [name]: value });
+      const agentId = name.startsWith("agent:") ? name.slice(6) : null;
+      const next = await saveAgentSecrets(agentId ? { agents: { [agentId]: value } } : { [name]: value });
       setStatus(next);
-      setNotice(value ? `${status.secretLabels[name].label} saved.` : `${status.secretLabels[name].label} removed.`);
+      const label = agentId ? `${draft.agents.find((a) => a.id === agentId)?.name ?? "Agent"} API key` : status.secretLabels[name].label;
+      setNotice(value ? `${label} saved.` : `${label} removed.`);
       return true;
     } catch (err) {
       setError(err.message);
@@ -133,7 +192,7 @@ export default function AgentPanel() {
     }
   };
   const sendTest = () => run("test", async () => { const r = await testAgentTelegram(); setNotice(`Test message sent to Telegram user ${r.sentTo}. Check your phone.`); });
-  const ask = () => run("try", async () => { setReply(null); setReply(await tryAgent(question)); });
+  const ask = () => run("try", async () => { setReply(null); setReply(await tryAgent(question, tryId || undefined)); });
 
   const origin = typeof window !== "undefined" ? window.location.origin : "http://127.0.0.1:8000";
   const mcpCommand = `claude mcp add trading-platform \\\n  --env PLATFORM_URL=${origin} \\\n  --env APP_USERNAME=admin \\\n  --env APP_PASSWORD=YOUR_DASHBOARD_PASSWORD \\\n  -- node /path/to/trading-bot-render/server/mcp.js`;
@@ -144,6 +203,8 @@ export default function AgentPanel() {
   if (!status || !draft) return <div className="agent-view"><section className="panel"><p className="log-empty">{error ?? "Loading the agent settings…"}</p></section></div>;
 
   const { secrets, bot } = status;
+  const activeSaved = status.agents.find((a) => a.id === status.config.activeAgentId);
+  const tryTarget = status.agents.find((a) => a.id === (tryId || status.config.activeAgentId));
   const groups = KIND_GROUPS.map(([kind, title, note]) => ({ kind, title, note, tools: status.tools.filter((t) => t.kind === kind) }));
 
   return (
@@ -163,9 +224,8 @@ export default function AgentPanel() {
             <strong>Telegram bot token.</strong> In Telegram, open <b>@BotFather</b>, send <code>/newbot</code>, and paste the token it gives you.
             <KeyField name="telegram" info={secrets.telegram} spec={status.secretLabels.telegram} canStore={status.canStoreKeys} busy={busy != null} onSave={saveKey} />
           </Step>
-          <Step done={secrets.anthropic.set}>
-            <strong>Claude API key.</strong> Create one at <b>console.anthropic.com</b> and paste it here.
-            <KeyField name="anthropic" info={secrets.anthropic} spec={status.secretLabels.anthropic} canStore={status.canStoreKeys} busy={busy != null} onSave={saveKey} />
+          <Step done={Boolean(activeSaved?.key.set)}>
+            <strong>An AI agent with its API key.</strong> Under “Agents” below, choose a provider (Claude, Gemini, OpenAI, …) and paste its key.{activeSaved && !activeSaved.key.set ? <span className="agent-bad"> “{activeSaved.name}” has no key yet.</span> : null}
           </Step>
           <Step done={status.allowedCount > 0}>
             <strong>Your Telegram user ID.</strong> Send any message to your bot: it replies with your ID. Add it under “Who can talk to the bot”.
@@ -179,6 +239,37 @@ export default function AgentPanel() {
           </Step>
         </ol>
         <p className="agent-hint">Keys are write-only: once saved they are stored encrypted on the server and are never shown again, only the last four characters. You can also set them as environment variables on the server instead.</p>
+      </section>
+
+      <section className="panel agent-wide">
+        <div className="panel-heading">
+          <div><p className="panel-title">Agents</p><p className="panel-subtitle">Set up as many as you like (up to {status.maxAgents}), each with its own provider, model and key. The active one answers; in Telegram, <code>/agent</code> switches it for that chat.</p></div>
+          <button type="button" className="secondary-button" onClick={addAgent} disabled={draft.agents.length >= status.maxAgents}>Add an agent</button>
+        </div>
+        <div className="agent-cards">
+          {draft.agents.map((a) => (
+            <AgentCard
+              key={a.id}
+              agent={a}
+              saved={status.agents.find((x) => x.id === a.id && x.provider === a.provider)}
+              provider={status.providers[a.provider]}
+              providers={status.providers}
+              active={draft.activeAgentId === a.id}
+              canRemove={draft.agents.length > 1}
+              canStore={status.canStoreKeys}
+              busy={busy != null}
+              onChange={(patch) => updateAgent(a.id, patch)}
+              onActivate={() => set({ activeAgentId: a.id })}
+              onRemove={() => removeAgent(a.id)}
+              onSaveKey={saveKey}
+            />
+          ))}
+        </div>
+        <p className="agent-hint">Every agent follows the same rules: orders are only ever proposed and need your confirmation, nothing runs on the live account unless you allow it, and the agent cannot change the account mode, risk rules or bots. Smaller or local models follow instructions less reliably, but they cannot do more than a strong one.</p>
+        <label className="agent-field">Your own instructions for every agent (optional)
+          <textarea rows={3} maxLength={2000} value={draft.instructions} onChange={(e) => set({ instructions: e.target.value })} placeholder="For example: answer in French. I trade mostly BTC and ETH. Never suggest more than 2% risk per trade." />
+        </label>
+        <span className="agent-hint">{draft.instructions.length} / 2000. The safety rules cannot be overridden by these.</span>
       </section>
 
       <section className="panel">
@@ -198,28 +289,6 @@ export default function AgentPanel() {
           <button type="button" className="secondary-button" onClick={sendTest} disabled={busy != null || dirty || !secrets.telegram.set || status.allowedCount === 0} title={dirty ? "Save your changes first" : "Send a message to the first allowed user"}>{busy === "test" ? "Sending…" : "Send a test message"}</button>
           <span className="agent-hint">Open your bot in Telegram and press Start once, or Telegram will not deliver it.</span>
         </div>
-      </section>
-
-      <section className="panel">
-        <div className="panel-heading"><div><p className="panel-title">The AI model</p><p className="panel-subtitle">What answers you in Telegram.</p></div></div>
-        <div className="agent-models" role="radiogroup" aria-label="Model">
-          {status.models.map((m) => (
-            <label key={m.id} className={`agent-model${draft.model === m.id ? " is-on" : ""}`}>
-              <input type="radio" name="agent-model" checked={draft.model === m.id} onChange={() => set({ model: m.id })} />
-              <strong>{m.label}</strong><span>{m.note}</span>
-            </label>
-          ))}
-        </div>
-        <div className="agent-row">
-          <label className="agent-field">How much it thinks
-            <select value={draft.effort} onChange={(e) => set({ effort: e.target.value })}>{EFFORTS.map(([v, l]) => <option key={v} value={v}>{l}</option>)}</select>
-          </label>
-          <span className="agent-hint">More thinking is slower and costs more. Balanced suits most questions.</span>
-        </div>
-        <label className="agent-field">Your own instructions (optional)
-          <textarea rows={4} maxLength={2000} value={draft.instructions} onChange={(e) => set({ instructions: e.target.value })} placeholder="For example: answer in French. I trade mostly BTC and ETH. Never suggest more than 2% risk per trade." />
-        </label>
-        <span className="agent-hint">{draft.instructions.length} / 2000. The safety rules cannot be overridden by these.</span>
       </section>
 
       <section className="panel">
@@ -265,12 +334,17 @@ export default function AgentPanel() {
       <section className="panel agent-wide">
         <div className="panel-heading"><div><p className="panel-title">Try it here</p><p className="panel-subtitle">Ask the agent something without Telegram. Orders are shown, never sent. Uses your saved settings.</p></div></div>
         <div className="agent-row">
+          <select value={tryId} onChange={(e) => setTryId(e.target.value)} aria-label="Which agent to ask">
+            <option value="">Active agent{activeSaved ? ` (${activeSaved.name})` : ""}</option>
+            {status.agents.filter((a) => !a.active).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+          </select>
           <input value={question} onChange={(e) => setQuestion(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter" && question.trim() && busy == null) ask(); }} placeholder="e.g. What's the BTCUSDT trend on 4h?" aria-label="Ask the agent" maxLength={2000} />
-          <button type="button" className="primary-button agent-ask" onClick={ask} disabled={busy != null || !question.trim() || !secrets.anthropic.set}>{busy === "try" ? "Thinking…" : "Ask"}</button>
+          <button type="button" className="primary-button agent-ask" onClick={ask} disabled={busy != null || !question.trim() || !tryTarget?.key.set}>{busy === "try" ? "Thinking…" : "Ask"}</button>
         </div>
-        {!secrets.anthropic.set && <p className="agent-bad">Needs the Claude API key from the checklist at the top.</p>}
+        {tryTarget && !tryTarget.key.set && <p className="agent-bad">“{tryTarget.name}” needs its API key first (see Agents above).</p>}
         {reply && (
           <div className="agent-reply">
+            {reply.agent && <p className="agent-hint">Answer from {reply.agent}</p>}
             <p>{reply.text}</p>
             {reply.wouldAskToConfirm.length > 0 && <div className="agent-would"><b>It would ask you to confirm:</b><ul>{reply.wouldAskToConfirm.map((s) => <li key={s}>{s}</li>)}</ul></div>}
           </div>

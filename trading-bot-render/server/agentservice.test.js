@@ -81,13 +81,13 @@ test("settings: defaults are safe, partial changes merge, and bad values are ref
   assert.equal(DEFAULT_CONFIG.enabled, false);
   assert.equal(DEFAULT_CONFIG.allowTrading, false);
   assert.equal(DEFAULT_CONFIG.allowLive, false);
-  const c = normalizeConfig({ enabled: true, allowedUserIds: [" 123456 ", 123456, "777888"], effort: "high", instructions: "  Answer in French.  ", voice: { language: "fr" } });
+  const c = normalizeConfig({ enabled: true, allowedUserIds: [" 123456 ", 123456, "777888"], instructions: "  Answer in French.  ", voice: { language: "fr" } });
   assert.equal(c.enabled, true);
   assert.deepEqual(c.allowedUserIds, ["123456", "777888"]);
   assert.equal(c.instructions, "Answer in French.");
   assert.deepEqual(c.voice, { enabled: true, language: "fr" });
-  assert.equal(c.model, "claude-opus-5-5", "what was not mentioned is kept");
-  for (const bad of [{ enabled: "yes" }, { model: "gpt-4" }, { effort: "max" }, { instructions: "x".repeat(2001) }, { allowedUserIds: ["abc"] }, { allowedUserIds: Array(11).fill("123456") }, { tools: { made_up: false } }, { tools: { get_price: "no" } }, { voice: { language: "klingon!" } }, []]) {
+  assert.equal(c.agents[0].model, "claude-opus-5-5", "what was not mentioned is kept");
+  for (const bad of [{ enabled: "yes" }, { instructions: "x".repeat(2001) }, { allowedUserIds: ["abc"] }, { allowedUserIds: Array(11).fill("123456") }, { tools: { made_up: false } }, { tools: { get_price: "no" } }, { voice: { language: "klingon!" } }, []]) {
     assert.throws(() => normalizeConfig(bad), (err) => err.httpStatus === 400, JSON.stringify(bad));
   }
 });
@@ -129,13 +129,14 @@ function rig({ env = {}, passphrase = "pw", sendMessageAnswer, injectClient = tr
 test("the status never contains a key, only whether each is set", async () => {
   const { service } = rig();
   await service.init();
-  await service.saveSecrets({ telegram: TG, anthropic: CLAUDE, speech: STT });
+  await service.saveSecrets({ telegram: TG, speech: STT, agents: { default: CLAUDE } });
   const status = service.status();
   const text = JSON.stringify(status);
   for (const key of [TG, CLAUDE, STT]) assert.ok(!text.includes(key), "a key leaked into the status");
   assert.deepEqual(status.secrets.telegram, { set: true, source: "page", hint: "…1234" });
   assert.equal(status.canStoreKeys, true);
-  assert.equal(status.secretLabels.anthropic.env, "ANTHROPIC_API_KEY");
+  assert.equal(status.secretLabels.telegram.env, "TELEGRAM_BOT_TOKEN");
+  assert.deepEqual(status.agents[0].key, { set: true, source: "page", hint: "…5678" });
 });
 
 test("the bot starts only when it is switched on and everything it needs is there, and says what is missing", async () => {
@@ -144,8 +145,8 @@ test("the bot starts only when it is switched on and everything it needs is ther
   await service.save({ enabled: true });
   assert.match(service.status().bot.error, /Telegram bot token/);
   await service.saveSecrets({ telegram: TG });
-  assert.match(service.status().bot.error, /Claude API key/);
-  await service.saveSecrets({ anthropic: CLAUDE });
+  assert.match(service.status().bot.error, /API key for the agent "Claude"/);
+  await service.saveSecrets({ agents: { default: CLAUDE } });
   assert.match(service.status().bot.error, /Telegram user ID/);
   assert.equal(service.status().bot.running, false);
   await service.save({ allowedUserIds: ["424242"] });
@@ -174,13 +175,13 @@ test("a rejected Telegram token is explained on the page instead of failing sile
 test("settings and keys survive a restart of the server, including live permission that was confirmed", async () => {
   const first = rig();
   await first.service.init();
-  await first.service.saveSecrets({ anthropic: CLAUDE });
+  await first.service.saveSecrets({ agents: { default: CLAUDE } });
   await first.service.save({ allowedUserIds: ["424242"], allowTrading: true, allowLive: true, confirmLive: "LIVE", instructions: "be brief" });
   const second = new AgentService({ store: first.store, env: { APP_PASSWORD: "pw" }, getApi: () => async () => ({}), vault: new SecretVault({ store: first.store, passphrase: "pw", env: {} }) });
   await second.init();
   const c = second.status().config;
   assert.deepEqual([c.allowTrading, c.allowLive, c.instructions, c.allowedUserIds], [true, true, "be brief", ["424242"]]);
-  assert.equal(second.status().secrets.anthropic.set, true);
+  assert.equal(second.status().agents[0].key.set, true);
 });
 
 test("allowed users come from the settings and the environment together", async () => {
@@ -195,7 +196,7 @@ test("changes to trading and live permission are written to the activity log", a
   await service.init();
   await service.save({ allowTrading: true });
   assert.ok(service.status().log.some((e) => e.type === "settings" && /allowTrading=true/.test(e.detail)));
-  await service.saveSecrets({ anthropic: CLAUDE });
+  await service.saveSecrets({ agents: { default: CLAUDE } });
   const entry = service.status().log.find((e) => /Claude API key saved/.test(e.detail));
   assert.ok(entry && !JSON.stringify(entry).includes(CLAUDE));
 });
@@ -219,8 +220,8 @@ test("the test message reaches the first allowed user, or explains why not", asy
 test("trying the agent on the page answers, and never leaves an order waiting", async () => {
   const { service } = rig();
   await service.init();
-  await service.saveSecrets({ anthropic: CLAUDE });
-  assert.deepEqual(await service.tryAgent("ping"), { text: "pong", wouldAskToConfirm: [] });
+  await service.saveSecrets({ agents: { default: CLAUDE } });
+  assert.deepEqual(await service.tryAgent("ping"), { text: "pong", agent: "Claude", wouldAskToConfirm: [] });
   await assert.rejects(service.tryAgent("   "), /Write something/);
   assert.equal(service.agent.pendingCount(), 0);
 });
@@ -244,18 +245,19 @@ test("HTTP: read the status, change settings, save a key, and get clear errors",
     assert.equal(status.status, 200);
     assert.equal(status.body.config.enabled, false);
     assert.ok(status.body.tools.some((t) => t.name === "place_spot_order" && t.kind === "trade"));
-    assert.equal((await call("PUT", "/agent", { effort: "high" })).body.config.effort, "high");
+    assert.equal((await call("PUT", "/agent", { instructions: "be brief" })).body.config.instructions, "be brief");
     assert.equal((await call("PUT", "/agent", { allowTrading: true, allowLive: true })).status, 400);
-    assert.match((await call("PUT", "/agent", { model: "gpt-4" })).body.detail, /Claude model/);
-    const saved = await call("PUT", "/agent/secrets", { anthropic: CLAUDE });
+    assert.match((await call("PUT", "/agent", { agents: [{ name: "X", provider: "nope", model: "m" }] })).body.detail, /unknown provider/);
+    const saved = await call("PUT", "/agent/secrets", { agents: { default: CLAUDE } });
     assert.equal(saved.status, 200);
-    assert.equal(saved.body.secrets.anthropic.set, true);
+    assert.equal(saved.body.agents[0].key.set, true);
     assert.ok(!JSON.stringify(saved.body).includes(CLAUDE));
-    assert.equal((await call("PUT", "/agent/secrets", { anthropic: "nope" })).status, 400);
+    assert.equal((await call("PUT", "/agent/secrets", { agents: { default: "nope" } })).status, 400);
+    assert.equal((await call("PUT", "/agent/secrets", { agents: { ghost: CLAUDE } })).status, 400);
     assert.equal((await call("PUT", "/agent/secrets", { made_up: "x" })).status, 400);
     assert.equal((await call("PUT", "/agent/secrets", {})).status, 400);
-    const removed = await call("PUT", "/agent/secrets", { anthropic: "" });
-    assert.equal(removed.body.secrets.anthropic.set, false);
+    const removed = await call("PUT", "/agent/secrets", { agents: { default: "" } });
+    assert.equal(removed.body.agents[0].key.set, false);
     assert.equal((await call("POST", "/agent/try", { text: "" })).status, 400);
   } finally {
     server.close();

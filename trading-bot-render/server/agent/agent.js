@@ -16,10 +16,6 @@ const MAX_RESULT_CHARS = 8000;
 const KEEP_TURNS = 6; // earlier messages remembered per chat
 const MAX_PENDING = 5;
 export const PROPOSAL_TTL_MS = 10 * 60_000;
-const FALLBACK_BETA = "server-side-fallback-2026-07-01";
-// Models that take the refusal-fallback parameter, and the ones that take an effort setting.
-const FALLBACK_MODELS = new Set(["claude-fable-5-1", "claude-opus-5-5", "claude-opus-5", "claude-sonnet-5-5"]);
-const EFFORT_MODELS = /^claude-(opus|sonnet|fable|mythos)-/;
 
 export const SYSTEM_PROMPT = `You are the assistant of a personal trading platform, talking to its owner in Telegram.
 
@@ -48,20 +44,21 @@ function withoutThinking(message) {
 
 export class Agent {
   /**
-   * @param getClient   () => Anthropic client (throws a ToolError with a clear message when there is no key)
+   * @param getAgent    (sessionId, agentId?) => { name, call }: the model to use. `call({ system, tools, messages })` returns a
+   *                    Claude-style message whichever company's model it is (see models.js). Throws a ToolError with a
+   *                    clear message when that agent has no key yet.
    * @param getConfig   async () => the agent settings
    * @param api         (method, path, body) => json, the platform's API
    * @param audit       (entry) => void, a record of what the agent did
    */
-  constructor({ getClient, getConfig, api, now = Date.now, audit = () => {} }) {
-    this.getClient = getClient;
+  constructor({ getAgent, getConfig, api, now = Date.now, audit = () => {} }) {
+    this.getAgent = getAgent;
     this.getConfig = getConfig;
     this.api = api;
     this.now = now;
     this.audit = audit;
     this.sessions = new Map();
     this.proposals = new Map();
-    this.fallbackOff = false;
   }
 
   clear(sessionId) {
@@ -84,13 +81,14 @@ export class Agent {
 
   /**
    * One user message in, one answer out.
-   * @returns {{ text: string, proposals: {id: string, summary: string}[] }}
+   * @returns {{ text: string, agent: string, proposals: {id: string, summary: string}[] }}
    */
-  async reply(sessionId, text, { user = null, voice = false } = {}) {
+  async reply(sessionId, text, { user = null, voice = false, agentId = undefined } = {}) {
     const config = await this.getConfig();
-    const client = this.getClient();
+    const model = await this.getAgent(sessionId, agentId);
+    const system = this.#system(config);
+    const toolDefs = offeredTools(config).map((t) => ({ name: t.name, description: t.description, input_schema: t.input_schema }));
     const session = this.#session(sessionId);
-    const tools = offeredTools(config);
     const notes = session.notes.splice(0).map((n) => `[Note: ${n}]`).join("\n");
     const said = `${voice ? "[Voice message, transcribed automatically] " : ""}${text}`;
     const turn = [{ role: "user", content: notes ? `${notes}\n${said}` : said }];
@@ -98,7 +96,7 @@ export class Agent {
     let answer = "";
 
     for (let round = 0; round < MAX_ROUNDS; round++) {
-      const response = await this.#call(client, config, tools, [...session.turns.flat(), ...turn]);
+      const response = await model.call({ system, tools: toolDefs, messages: [...session.turns.flat(), ...turn] });
       turn.push({ role: "assistant", content: response.content });
       const spoken = response.content.filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
       const uses = response.content.filter((b) => b.type === "tool_use");
@@ -120,30 +118,11 @@ export class Agent {
 
     session.turns.push(turn.map(withoutThinking).filter(Boolean));
     while (session.turns.length > KEEP_TURNS) session.turns.shift();
-    return { text: answer, proposals };
+    return { text: answer, agent: model.name, proposals };
   }
 
-  async #call(client, config, tools, messages) {
-    const params = {
-      model: config.model,
-      max_tokens: 16000,
-      system: config.instructions ? `${SYSTEM_PROMPT}\n\nThe owner's own preferences (follow them unless they conflict with the rules above):\n${config.instructions}` : SYSTEM_PROMPT,
-      tools: tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.input_schema })),
-      messages,
-    };
-    if (EFFORT_MODELS.test(config.model) && config.effort) params.output_config = { effort: config.effort };
-    if (FALLBACK_MODELS.has(config.model) && !this.fallbackOff) {
-      try {
-        return await client.beta.messages.create({ ...params, betas: [FALLBACK_BETA], fallbacks: "default" });
-      } catch (err) {
-        // If the API does not accept the fallback option for this account or model, carry on without it.
-        if (err?.status === 400 && /fallback/i.test(String(err.message))) {
-          this.fallbackOff = true;
-          this.audit({ type: "note", detail: "Refusal fallback is not available for this model or account; continuing without it." });
-        } else throw err;
-      }
-    }
-    return client.messages.create(params);
+  #system(config) {
+    return config.instructions ? `${SYSTEM_PROMPT}\n\nThe owner's own preferences (follow them unless they conflict with the rules above):\n${config.instructions}` : SYSTEM_PROMPT;
   }
 
   async #runTool(use, config, sessionId, user, proposals) {

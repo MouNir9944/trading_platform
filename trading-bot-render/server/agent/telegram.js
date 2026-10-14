@@ -24,7 +24,7 @@ const HELP = `I'm the assistant of your trading platform. Ask me in plain words,
 
 If you ask me to place an order I only propose it: nothing is sent until you press Confirm.
 
-/clear forgets this conversation   /id shows your Telegram ID   /help shows this`;
+/agent chooses which AI agent answers   /clear forgets this conversation   /id shows your Telegram ID   /help shows this`;
 
 /** Split a long answer on line breaks so each part fits in one Telegram message. */
 export function splitMessage(text, size = CHUNK) {
@@ -49,8 +49,9 @@ export class TelegramBot {
    * @param allowedIds () => Set<string> of every user ID allowed (settings plus environment)
    * @param audit      (entry) => void
    */
-  constructor({ token, agent, stt, getConfig, allowedIds, audit = () => {}, fetchFn = fetch, now = Date.now }) {
+  constructor({ token, agent, stt, getConfig, allowedIds, audit = () => {}, fetchFn = fetch, now = Date.now, agents = null }) {
     this.token = token;
+    this.agents = agents; // { list(chat), select(chat, name) } for the /agent command
     this.agent = agent;
     this.stt = stt;
     this.getConfig = getConfig;
@@ -185,6 +186,13 @@ export class TelegramBot {
     const command = msg.text?.startsWith("/") ? msg.text.split(/[\s@]/)[0].toLowerCase() : null;
     if (command === "/start" || command === "/help") return this.#send(chatId, HELP);
     if (command === "/id") return this.#send(chatId, `Your Telegram ID is ${user}.`);
+    if (command === "/agent" || command === "/agents") {
+      if (!this.agents) return this.#send(chatId, "Only one agent is set up.");
+      const wanted = msg.text.replace(/^\/\w+(@\w+)?\s*/, "").trim();
+      if (wanted) return this.#send(chatId, this.agents.select(String(chatId), wanted).text);
+      const rows = this.agents.list(String(chatId)).map((a) => `${a.active ? "▶" : "•"} ${a.name} — ${a.provider}, ${a.model}${a.ready ? "" : " (no key yet)"}`);
+      return this.#send(chatId, `${rows.join("\n")}\n\nSend /agent followed by a name to switch, for example: /agent ${this.agents.list(String(chatId))[0]?.name ?? "Claude"}`);
+    }
     if (command === "/clear") { this.agent.clear(String(chatId)); return this.#send(chatId, "Done: I've forgotten our conversation."); }
 
     let text = msg.text;

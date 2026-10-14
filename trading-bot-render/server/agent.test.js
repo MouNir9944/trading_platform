@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { Agent, PROPOSAL_TTL_MS, SYSTEM_PROMPT } from "./agent/agent.js";
+import { anthropicCaller } from "./agent/models.js";
 import { ToolError } from "./agent/tools.js";
 
 // ---------- fakes ----------
@@ -39,7 +40,9 @@ const ORDER = { symbol: "XLMUSDT", entry_price: 0.2, capital_usdt: 50, stop_loss
 const build = ({ script, config = {}, platform = fakePlatform(), now = () => 1_000_000, audit = () => {} } = {}) => {
   const client = fakeClaude(script);
   const cfg = { model: "claude-opus-5-5", effort: "medium", instructions: "", allowTrading: true, allowLive: false, tools: {}, ...config };
-  const agent = new Agent({ getClient: () => client, getConfig: async () => cfg, api: platform.api, now, audit });
+  const state = { fallbackOff: false };
+  const getAgent = async () => ({ id: "default", name: "Claude", call: anthropicCaller({ client, model: cfg.model, effort: cfg.effort, onNote: (detail) => audit({ type: "note", detail }), state }) });
+  const agent = new Agent({ getAgent, getConfig: async () => cfg, api: platform.api, now, audit });
   return { agent, client, platform, cfg };
 };
 const posts = (platform) => platform.calls.filter((c) => c.method === "POST" || c.method === "DELETE");
@@ -49,7 +52,7 @@ const posts = (platform) => platform.calls.filter((c) => c.method === "POST" || 
 test("a plain question gets a plain answer, with the safety prompt, the tools and the chosen model", async () => {
   const { agent, client } = build({ script: [say("Hello!")] });
   const r = await agent.reply("chat1", "hi");
-  assert.deepEqual(r, { text: "Hello!", proposals: [] });
+  assert.deepEqual(r, { text: "Hello!", agent: "Claude", proposals: [] });
   const { params } = client.calls[0];
   assert.equal(params.model, "claude-opus-5-5");
   assert.equal(params.system, SYSTEM_PROMPT);
