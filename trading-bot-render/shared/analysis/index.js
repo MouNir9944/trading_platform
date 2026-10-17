@@ -8,6 +8,7 @@ export * from "./sessions.js";
 export * from "./smc.js";
 export * from "./amd.js";
 export * from "./volumeProfile.js";
+export * from "./orderFlow.js";
 export * from "./manipulation.js";
 export * from "./phase.js";
 export * from "./performance.js";
@@ -15,6 +16,7 @@ export * from "./performance.js";
 /**
  * Raw Binance klines (arrays) -> candle objects, oldest first, duplicates removed.
  * `closeTime` (ms) lets `analyze` know whether the last candle is still forming.
+ * `takerBuyVolume` is the part of `volume` bought at the ask (null when the data source does not say), the basis of order flow.
  */
 export function toCandles(klines) {
   const unique = new Map(klines.map((k) => [Number(k[0]), k]));
@@ -28,6 +30,8 @@ export function toCandles(klines) {
       close: Number(k[4]),
       volume: Number(k[5]),
       closeTime: Number(k[6]) || null,
+      // Binance klines also carry how much of the volume was bought by aggressive buyers (market buys). Other sources do not.
+      takerBuyVolume: k[9] != null && Number.isFinite(Number(k[9])) ? Number(k[9]) : null,
     }));
 }
 

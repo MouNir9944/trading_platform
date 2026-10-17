@@ -19,8 +19,9 @@
 import { amdStrategy } from "./amd.js";
 import { classicStrategies } from "./classic.js";
 import { rangeBounceStrategy } from "./rangeBounce.js";
+import { volumeFlowStrategy } from "./volumeFlow.js";
 
-export const STRATEGIES = [amdStrategy, rangeBounceStrategy, ...classicStrategies];
+export const STRATEGIES = [amdStrategy, rangeBounceStrategy, volumeFlowStrategy, ...classicStrategies];
 export const STRATEGY_BY_ID = Object.fromEntries(STRATEGIES.map((s) => [s.id, s]));
 
 const bad = (message) => Object.assign(new Error(message), { httpStatus: 422 });
